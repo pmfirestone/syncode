@@ -207,4 +207,14 @@ class Syncode:
                     print(prompt + completion)
 
 if __name__ == "__main__":
-    fire.Fire(compile_and_run)
+    with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            on_trace_ready=torch.profiler.tensorboard_trace_handler('tb_trace'),
+            execution_trace_observer=
+                torch.profiler.ExecutionTraceObserver().register_callback("./execution_trace.json")
+    ) as p:
+        fire.Fire(compile_and_run)
+        p.export_chrome_trace('chrome_trace.json')
