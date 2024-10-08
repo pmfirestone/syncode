@@ -136,6 +136,7 @@ class SyncodeLogitsProcessor(LogitsProcessor):
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:    
         # start_from is used for choosing where the parsing should start
         debug = True
+        assert len(input_ids) >= 0
         partial_codes = self._get_partial_codes(input_ids)
 
         for idx, partial_code in enumerate(partial_codes):
