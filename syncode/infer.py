@@ -15,20 +15,48 @@ from syncode.evaluation.json_eval import JSONEval
 from syncode.evaluation.fol_eval import FOLEval
 
 
-def compile_and_run(model, mode="grammar_strict", quantize=True, device="cuda", num_samples=1, grammar=None, dataset="input", num_few_shot=0, chat_mode=False, dev_mode=False, log_level=1, new_mask_store=False, parser="lalr", task_id=None, seed=None, **kwargs):
+def compile_and_run(model, mode="grammar_strict", quantize=True, device="cuda", num_samples=1, grammar=None, dataset="input", num_few_shot=0, chat_mode=False, dev_mode=False, log_level=1, new_mask_store=False, parser="lalr", task_id=None, seed=None, profiling=False, **kwargs):
 
     syncode = Syncode(model, mode=mode, quantize=quantize, device=device, num_samples=num_samples, grammar=grammar, chat_mode=chat_mode, dev_mode=dev_mode, log_level=log_level, new_mask_store=new_mask_store, parser=parser, seed=seed, **kwargs)
-    
-    if dataset == "input":
-        syncode.infer()
-    else:
-        # Setup output directory and logger
-        out_dir, out_path = common.get_output_path(model, grammar, dataset, num_samples, mode)
-        logger = common.Logger(num_samples, mode, parser, out_dir, log_level=log_level, task_id=task_id)
-        if syncode.grammar_decoder is not None: syncode.grammar_decoder.logger = logger
 
-        # Run evaluation
-        syncode.evaluate(dataset=dataset, task_id=task_id, out_path=out_path, logger=logger, num_few_shot=num_few_shot)
+    def trace_handler(p):
+        output = p.key_averages().table(sort_by="self_cuda_time_total", row_limit=10)
+        print(output)
+        p.export_chrome_trace("trace/" + str(model) + "/" + mode + "/rank_" + str(task_id) + ".json")
+
+    if profiling:
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=lambda _: torch.profiler.ProfilerAction.RECORD_AND_SAVE,
+            on_trace_ready=trace_handler,
+            record_shapes=True,
+            with_stack=True,
+            execution_trace_observer=
+                torch.profiler.ExecutionTraceObserver().register_callback("./execution_trace.json")
+        ) as p:
+            if dataset == "input":
+                syncode.infer()
+            else:
+                # Setup output directory and logger
+                out_dir, out_path = common.get_output_path(model, grammar, dataset, num_samples, mode)
+                logger = common.Logger(num_samples, mode, parser, out_dir, log_level=log_level, task_id=task_id)
+                if syncode.grammar_decoder is not None: syncode.grammar_decoder.logger = logger
+                # Run evaluation
+                syncode.evaluate(dataset=dataset, task_id=task_id, out_path=out_path, logger=logger, num_few_shot=num_few_shot)
+
+    else:
+        if dataset == "input":
+            syncode.infer()
+        else:
+            # Setup output directory and logger
+            out_dir, out_path = common.get_output_path(model, grammar, dataset, num_samples, mode)
+            logger = common.Logger(num_samples, mode, parser, out_dir, log_level=log_level, task_id=task_id)
+            if syncode.grammar_decoder is not None: syncode.grammar_decoder.logger = logger
+            # Run evaluation
+            syncode.evaluate(dataset=dataset, task_id=task_id, out_path=out_path, logger=logger, num_few_shot=num_few_shot)
 
 
 class Syncode:
@@ -115,7 +143,7 @@ class Syncode:
         if self.is_grammar_mode():
             self.grammar_decoder = SyncodeLogitsProcessor(
                 self.grammar, 
-                tokenizer=tokenizer, 
+                tokenizer=tokenizer.to('cpu'), 
                 use_cache=(not self.new_mask_store), 
                 parse_output_only=self.parse_output_only,
                 num_samples=self.num_samples, 
@@ -206,25 +234,6 @@ class Syncode:
                 for i, completion in enumerate(batch_completions):
                     print(prompt + completion)
 
-def trace_handler(p):
-    output = p.key_averages().table(sort_by="self_cuda_time_total", row_limit=10)
-    print(output)
-    p.export_chrome_trace("/tmp/trace/trace_" + str(p.step_num) + ".json")
 
 if __name__ == "__main__":
-    with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            schedule=torch.profiler.schedule(
-                wait=1,
-                warmup=1,
-                active=2),
-            on_trace_ready=trace_handler,
-            execution_trace_observer=
-                torch.profiler.ExecutionTraceObserver().register_callback("./execution_trace.json")
-    ) as p:
-        for idx in range(8):
-            fire.Fire(compile_and_run)
-            p.step()
+    fire.Fire(compile_and_run)
