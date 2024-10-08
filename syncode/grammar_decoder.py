@@ -173,6 +173,7 @@ class SyncodeLogitsProcessor(LogitsProcessor):
 
     def _get_partial_codes(self, input_ids: torch.LongTensor):   
         assert self.start_from <= input_ids.size(1), "Make sure that the decoder is reset for new prompt."            
+        torch.cuda.synchronize()
         partial_codes = self.tokenizer.batch_decode(input_ids[:, self.start_from:], skip_special_tokens=True)
         return partial_codes
 
