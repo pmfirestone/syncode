@@ -90,23 +90,23 @@ class HuggingFaceModel:
             stop_criteria = []
 
         # Generate completions
-        if (gen_mode == GenerationMode.SAMPLE or gen_mode == GenerationMode.GREEDY_SEARCH) and batch_size == 1: # Use our own implementation for greedy search and sampling
-            generated_ids = self._generate(
-                inputs, 
-                gen_config, 
-                gen_mode, 
-                grammar_decoder=self.grammar_decoder,
-                stop_criteria=stop_criteria
-                )
-        else:
+        # if (gen_mode == GenerationMode.SAMPLE or gen_mode == GenerationMode.GREEDY_SEARCH) and batch_size == 1: # Use our own implementation for greedy search and sampling
+        #     generated_ids = self._generate(
+        #         inputs, 
+        #         gen_config, 
+        #         gen_mode, 
+        #         grammar_decoder=self.grammar_decoder,
+        #         stop_criteria=stop_criteria
+        #         )
+        # else:
             # Use generate from transformers library for other modes
-            generated_ids = self.model.generate(
-                **inputs, 
-                logits_processor=self.logit_processors, 
-                stop_strings=stop_words,
-                tokenizer=self.tokenizer,
-                **self.gen_args
-                )
+        generated_ids = self.model.generate(
+            **inputs, 
+            logits_processor=self.logit_processors, 
+            stop_strings=stop_words,
+            tokenizer=self.tokenizer,
+            **self.gen_args
+        )
         batch_completions = []
 
         # TODO: Move this to CodeEval
