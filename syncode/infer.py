@@ -143,7 +143,7 @@ class Syncode:
         if self.is_grammar_mode():
             self.grammar_decoder = SyncodeLogitsProcessor(
                 self.grammar, 
-                tokenizer=tokenizer.to('cpu'), 
+                tokenizer=tokenizer,
                 use_cache=(not self.new_mask_store), 
                 parse_output_only=self.parse_output_only,
                 num_samples=self.num_samples, 
