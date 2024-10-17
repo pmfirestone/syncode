@@ -136,7 +136,6 @@ class SyncodeLogitsProcessor(LogitsProcessor):
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:    
         # start_from is used for choosing where the parsing should start
         debug = True
-        assert len(input_ids) >= 0
         partial_codes = self._get_partial_codes(input_ids)
 
         for idx, partial_code in enumerate(partial_codes):
@@ -173,8 +172,7 @@ class SyncodeLogitsProcessor(LogitsProcessor):
         return scores
 
     def _get_partial_codes(self, input_ids: torch.LongTensor):   
-        assert self.start_from <= input_ids.size(1), "Make sure that the decoder is reset for new prompt."            
-        torch.cuda.synchronize()
+        assert self.start_from <= input_ids.size(1), "Make sure that the decoder is reset for new prompt."
         partial_codes = self.tokenizer.batch_decode(input_ids[:, self.start_from:], skip_special_tokens=True)
         return partial_codes
 
