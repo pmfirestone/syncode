@@ -103,7 +103,7 @@ class HuggingFaceModel:
             # Use generate from transformers library for other modes
         generated_ids = self.model.generate(
             **inputs, 
-            logits_processor=self.logit_processors, 
+            logits_processor=self.grammar_processor,
             stop_strings=stop_words,
             tokenizer=self.tokenizer,
             **self.gen_args
