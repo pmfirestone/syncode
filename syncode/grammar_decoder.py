@@ -157,6 +157,7 @@ class SyncodeLogitsProcessor(LogitsProcessor):
                 greedy_token = self.tokenizer.decode(scores[idx].argmax(dim=-1)) 
 
             if torch.sum(accept_mask) != 0: # If there are acceptable tokens for the current partial code 
+            if torch.any(accept_mask): # If there are acceptable tokens
                 if len(scores[idx]) != len(accept_mask):
                     # Pad accept_mask with 0 values. Since scores[i] may be longer than tokenizer vocab size, we need to pad accept_mask with 0 values
                     accept_mask = torch.cat((accept_mask, torch.zeros(len(scores[idx]) - len(accept_mask), dtype=torch.bool)))
