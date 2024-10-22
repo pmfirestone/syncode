@@ -149,20 +149,24 @@ class SyncodeLogitsProcessor(LogitsProcessor):
                 continue  # Skip altering the scores for this batch
 
             self.update_valid_state(input_ids, idx, r)
-        
-            accept_mask = self.dfa_mask_store.get_accept_mask(r, logger=self.logger)
+
+            accept_mask = self.dfa_mask_store.get_accept_mask(r, logger=self.logger) # What device is accept_mask on at this point?
 
             if DEBUG: 
                 self._log_current_status(partial_code, r)
                 greedy_token = self.tokenizer.decode(scores[idx].argmax(dim=-1)) 
 
-            if torch.sum(accept_mask) != 0: # If there are acceptable tokens for the current partial code 
             if torch.any(accept_mask): # If there are acceptable tokens
+                # for the current partial code Propose replacing this sum with
+                # a call to any. Potentially ~1/2 the time cost. This check
+                # could also be removed: what purpose does it really serve?
                 if len(scores[idx]) != len(accept_mask):
                     # Pad accept_mask with 0 values. Since scores[i] may be longer than tokenizer vocab size, we need to pad accept_mask with 0 values
                     accept_mask = torch.cat((accept_mask, torch.zeros(len(scores[idx]) - len(accept_mask), dtype=torch.bool)))
-                    
+
                 scores[idx] = scores[idx].masked_fill(~accept_mask.to(scores.device), -float("inf"))
+                # This masked_fill, in particular, is slow. Is there a more
+                # efficient way to accomplish this? Maybe an addition?
             else: # Otherwise, report the error and mask no tokens
                 self.logger.log('No acceptable tokens for the current partial code!')
                 self._log_current_status(partial_code, r)
