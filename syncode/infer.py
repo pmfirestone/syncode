@@ -32,7 +32,7 @@ def compile_and_run(model, mode="grammar_strict", quantize=True, device="cuda", 
             ],
             schedule=lambda _: torch.profiler.ProfilerAction.RECORD_AND_SAVE,
             on_trace_ready=trace_handler,
-            record_shapes=True,
+            record_shapes=False,
             with_stack=True,
             execution_trace_observer=
                 torch.profiler.ExecutionTraceObserver().register_callback("./execution_trace.json")
