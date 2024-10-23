@@ -15,14 +15,14 @@ from syncode.evaluation.json_eval import JSONEval
 from syncode.evaluation.fol_eval import FOLEval
 
 
-def compile_and_run(model, mode="grammar_strict", quantize=True, device="cuda", num_samples=1, grammar=None, dataset="input", num_few_shot=0, chat_mode=False, dev_mode=False, log_level=1, new_mask_store=False, parser="lalr", task_id=None, seed=None, profiling=False, **kwargs):
+def compile_and_run(model, mode="grammar_strict", quantize=True, device="cuda", num_samples=1, grammar=None, dataset="input", num_few_shot=0, chat_mode=False, dev_mode=False, log_level=1, new_mask_store=False, parser="lalr", task_id=None, seed=None, profiling=False, output_path="trace", **kwargs):
 
     syncode = Syncode(model, mode=mode, quantize=quantize, device=device, num_samples=num_samples, grammar=grammar, chat_mode=chat_mode, dev_mode=dev_mode, log_level=log_level, new_mask_store=new_mask_store, parser=parser, seed=seed, **kwargs)
 
     def trace_handler(p):
         output = p.key_averages().table(sort_by="self_cuda_time_total", row_limit=10)
         print(output)
-        p.export_chrome_trace("trace/" + str(model) + "/" + mode + "/rank_" + str(task_id) + ".json")
+        p.export_chrome_trace(output_path + str(model) + "/" + mode + "/task_" + str(task_id) + ".json")
 
     if profiling:
         with torch.profiler.profile(
