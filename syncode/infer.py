@@ -22,7 +22,7 @@ def compile_and_run(model, mode="grammar_strict", quantize=True, device="cuda", 
     def trace_handler(p):
         output = p.key_averages().table(sort_by="self_cuda_time_total", row_limit=10)
         print(output)
-        p.export_chrome_trace(output_path + str(model) + "/" + mode + "/task_" + str(task_id) + ".json")
+        p.export_chrome_trace(output_path + "/" + str(model) + "/" + mode + "/task_" + str(task_id) + ".json")
 
     if profiling:
         with torch.profiler.profile(
