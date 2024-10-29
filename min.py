@@ -14,7 +14,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 model_id = "microsoft/phi-2"
 model = AutoModelForCausalLM.from_pretrained(model_id).to("cuda")
 tokenizer = AutoTokenizer.from_pretrained(model_id)
-logits_processor = SyncodeLogitsProcessor(Grammar("python"), tokenizer)
+logits_processor = SyncodeLogitsProcessor(Grammar("python"), tokenizer, mode='grammar_mask', parser='lr')
 
 # Set up prompt and prime for input.
 prompt = '''def print_prime(n):
@@ -58,13 +58,13 @@ def task_durations(task_regex, input_file):
 syncode_tot = sum(
     task_durations(
         # This regex is very fragile and depends on how syncode was installed.
-        re.compile(r"evaluation/\.\./grammar_decoder.py\(\d+\): __call__"), trace_file
+        re.compile(r"evaluation/\.\./grammar_decoder\.py\(\d+\): __call__"), trace_file
     )
 )
 
 # Total time to generate.
 generate_tot = sum(
     task_durations(
-        re.compile(r"transformers/generation/utils.py\(\d+\): generate"), trace_file
+        re.compile(r"transformers/generation/utils\.py\(\d+\): generate"), trace_file
     )
 )
