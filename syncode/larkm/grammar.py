@@ -16,7 +16,7 @@ class Symbol(Serialize):
         self.name = name
 
     def __eq__(self, other):
-        assert isinstance(other, Symbol), other
+        # assert isinstance(other, Symbol), other
         return self.is_term == other.is_term and self.name == other.name
 
     def __ne__(self, other):
