@@ -5,6 +5,7 @@ from syncode.parsers.go_parser import GoIncrementalParser
 import syncode.common as common
 from syncode.larkm.lark import Lark
 from syncode.parsers.grammars.grammar import Grammar
+import lark_cython
 
 def create_parser(grammar: Grammar, parser='lalr', **kwargs) -> incremental_parser.IncrementalParser:   
         """ 
@@ -35,7 +36,8 @@ def create_base_parser(grammar, parser='lalr', indenter=None, cache_filename=Non
                         start="start",
                         postlex=indenter,
                         propagate_positions=True,
-                        cache = cache_filename
+                        cache = cache_filename,
+                        _plugins=lark_cython.plugins,
                     )
                 
     return base_parser
