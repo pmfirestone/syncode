@@ -37,7 +37,7 @@ def create_base_parser(grammar, parser='lalr', indenter=None, cache_filename=Non
                         postlex=indenter,
                         propagate_positions=True,
                         cache = cache_filename,
-                        # _plugins=lark_cython.plugins,
+                        _plugins=lark_cython.plugins,
                     )
                 
     return base_parser
