@@ -6,7 +6,7 @@ import regex
 import syncode.common as common
 from tqdm import tqdm
 from syncode.parsers import create_base_parser
-from syncode.larkm.lexer import TerminalDef
+from lark.lexer import TerminalDef
 from syncode.parse_result import IndentationConstraint, RemainderState, ParseResult
 from syncode.parsers.grammars.grammar import Grammar
 from typing import Any, Optional, Tuple, Iterable, Dict

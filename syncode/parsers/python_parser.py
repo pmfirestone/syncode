@@ -1,9 +1,9 @@
 import copy, regex
 from typing import Iterator
-import syncode.larkm as lark
+import lark
 import syncode.common as common
-from syncode.larkm import Token
-from syncode.larkm.indenter import Indenter
+from lark import Token
+from lark.indenter import Indenter
 from syncode.parsers.incremental_parser import IncrementalParser
 from syncode.parse_result import IndentationConstraint, ParseResult, RemainderState
 from typing import Optional, Iterable

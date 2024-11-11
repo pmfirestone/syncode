@@ -1,5 +1,5 @@
 import time
-import syncode.larkm as lark
+import lark
 from syncode.parsers.incremental_parser import IncrementalParser
 from syncode.parse_result import ParseResult, RemainderState
 

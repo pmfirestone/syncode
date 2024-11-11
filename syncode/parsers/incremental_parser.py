@@ -1,9 +1,9 @@
 import copy
 import syncode.common as common
-import syncode.larkm as lark
-from syncode.larkm.parsers.lalr_interactive_parser import InteractiveParser
+import lark
+from lark.parsers.lalr_interactive_parser import InteractiveParser
 from syncode.parse_result import ParseResult, RemainderState
-from syncode.larkm.lexer import Token
+from lark.lexer import Token
 from typing import Optional, Any, Tuple, Iterable
 
 class IncrementalParser:    

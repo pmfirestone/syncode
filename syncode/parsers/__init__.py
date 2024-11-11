@@ -3,9 +3,9 @@ from syncode.parsers import incremental_parser
 from syncode.parsers.python_parser import PythonIncrementalParser, PythonIndenter
 from syncode.parsers.go_parser import GoIncrementalParser
 import syncode.common as common
-from syncode.larkm.lark import Lark
+from lark.lark import Lark
 from syncode.parsers.grammars.grammar import Grammar
-import syncode.larkm_cython as lark_cython
+import lark_cython
 
 def create_parser(grammar: Grammar, parser='lalr', **kwargs) -> incremental_parser.IncrementalParser:   
         """ 
