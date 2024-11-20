@@ -85,6 +85,7 @@ class Syncode:
         log_level (int, optional): Log level. Defaults to 2. 0 for no logs, 1 for minimal logs, 2 for all logs including time.
         
         parser (str, optional): Parser to use. Defaults to "lalr".
+        opp (bool, optional): Whether to use opportunistic generation. Defaults to True.
     """
     def __init__(
         self, 
@@ -92,7 +93,6 @@ class Syncode:
         mode: Literal["original", "grammar_mask", "grammar_strict"] = "grammar_strict",
         quantize: bool = True,
         device: str = "cuda",
-        num_samples: int = 1,
         grammar: Optional[str] = None,
         chat_mode: bool = False,
         parse_output_only: bool = False,
@@ -101,6 +101,7 @@ class Syncode:
         new_mask_store: bool = False,
         parser: Literal["lr", "lalr"] = "lalr",
         seed: Optional[int] = None,
+        opp: bool = True,
         **kwargs
     ):  
         # Check inputs
@@ -114,7 +115,7 @@ class Syncode:
         self.model_name = model
         self.quantize = quantize
         self.device = device
-        self.num_samples = num_samples
+        self.num_samples = kwargs.get('num_return_sequences', 1)
         self.new_mask_store = new_mask_store
         self.parser = parser
         self.chat_mode = chat_mode
@@ -155,20 +156,21 @@ class Syncode:
         # Set LLM max new tokens to 200 by default
         kwargs['max_new_tokens'] = kwargs.get('max_new_tokens', 200)
 
-        self.model = HuggingFaceModel(
+        self.model: HuggingFaceModel = HuggingFaceModel(
             model, 
             grammar=self.grammar,
             tokenizer=tokenizer, 
             device=device, 
             grammar_decoder=self.grammar_decoder, 
-            mode=self.mode, 
+            mode=self.mode,
+            opp=opp,
             **kwargs
             )
 
     def is_grammar_mode(self):
         return self.mode == 'grammar_mask' or self.mode == 'grammar_strict'
 
-    def infer(self, prompt=None, stop_words=[]):
+    def infer(self, prompt=None, stop_words=None):
         output = self.user_input(prompt, stop_words=stop_words)
         return output
 
@@ -176,16 +178,22 @@ class Syncode:
             self, 
             dataset: Literal["mbxp", "humaneval", "mathqa-x", "gsm8k", "spider", "json_eval"],
             out_path: str=None,
+            num_tasks: Optional[int]=None,
             num_few_shot:int=0,
             logger=common.EmptyLogger(), 
             task_id=None,
-            prompt_type='original' # For JSONEvalL: "original" or "explicit"
+            prompt_type='original', # For JSONEvalL: "original" or "explicit"
+            format_tabs=False # For CodeEval: Format tabs in prompt
         ) -> dict:
         """
         Run evaluation on the model:
 
         Args:
             dataset (str): Dataset to evaluate on. Options are "mbxp", "humaneval", "mathqa-x", "gsm8k", "spider", "json_eval".
+
+            out_path (str, optional): Output path for evaluation results. Defaults to None.
+
+            num_tasks (int, optional): Number of tasks to evaluate. Defaults to None.
         
             num_few_shot (int, optional): Number of examples for few shot prompting. Defaults to 0.
 
@@ -198,11 +206,11 @@ class Syncode:
         self.dataset = Dataset(dataset, language=self.language, num_few_shot=num_few_shot)
 
         if self.dataset.type == "code": 
-            output = CodeEval.run_code_eval(self, self.num_samples, out_path, format_tabs=True, debug_task_id=task_id, logger=logger)
+            output = CodeEval.run_code_eval(self, self.num_samples, out_path, format_tabs=format_tabs, debug_task_id=task_id, logger=logger, num_tasks=num_tasks)
         elif self.dataset.type == "math":
             output = MathEval.run_math_eval(self, out_path, debug_task_id=task_id, logger=logger)
         elif self.dataset.type == "sql":
-            output = SQLEval.run_eval(self, out_path, debug_task_id=task_id)
+            output = SQLEval.run_eval(self, out_path, debug_task_id=task_id, num_tasks=num_tasks)
         elif self.dataset.type == "fol":
             output = FOLEval.run_eval(self, out_path, debug_task_id=task_id)
         elif self.dataset.type == "json":
@@ -212,7 +220,7 @@ class Syncode:
         logger.close()
         return output
 
-    def user_input(self, prompt:str, stop_words=[]):
+    def user_input(self, prompt:str, stop_words=None):
         """
         Run user input on the model with grammar mask
         """

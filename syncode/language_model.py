@@ -41,7 +41,8 @@ class HuggingFaceModel:
             before_prediction_hook=lambda: None, 
             device='cuda', 
             grammar_decoder=None, 
-            mode: str ='original', 
+            mode: str ='original',
+            opp: bool = True,
             **kwargs) -> None:
         super().__init__()
 
@@ -52,12 +53,13 @@ class HuggingFaceModel:
         self.best_of = best_of
         self._before_prediction_hook = before_prediction_hook
         self.grammar_decoder = grammar_decoder
-        self.grammar_processor: Iterable = LogitsProcessorList([self.grammar_decoder])
+        self.grammar_processor: Iterable = LogitsProcessorList([self.grammar_decoder]) if self.grammar_decoder is not None else None
 
         self.mode = mode
         self.grammar = grammar
         self.vocab = common.get_vocab_from_tokenizer(self.tokenizer)
         self.gen_args = kwargs
+        self.opp = opp
 
     def get_grammar_decoder(self):
         if self.grammar_processor is not None and len(self.grammar_processor) > 0:
@@ -65,7 +67,7 @@ class HuggingFaceModel:
         return None
 
     @torch.inference_mode()
-    def generate_batch_completion_grammar(self, prompt, batch_size, stop_words=None) -> Iterable[str]:
+    def generate_batch_completion_grammar(self, prompt, batch_size, stop_words=None, return_token_ids=False) -> Iterable[str]:
         '''
         Generates batch_size completions for the given prompt. 
         '''
@@ -91,15 +93,20 @@ class HuggingFaceModel:
             stop_criteria = []
 
         # Generate completions
-        # if (gen_mode == GenerationMode.SAMPLE or gen_mode == GenerationMode.GREEDY_SEARCH) and batch_size == 1: # Use our own implementation for greedy search and sampling
-        #     generated_ids = self._generate(
-        #         inputs, 
-        #         gen_config, 
-        #         gen_mode, 
-        #         grammar_decoder=self.grammar_decoder,
-        #         stop_criteria=stop_criteria
-        #         )
-        # else:
+        if self.opp and (gen_mode == GenerationMode.SAMPLE or gen_mode == GenerationMode.GREEDY_SEARCH) and batch_size == 1: # Use our own implementation for greedy search and sampling
+            generated_ids = self._generate(
+                inputs, 
+                gen_config, 
+                gen_mode, 
+                grammar_decoder=self.grammar_decoder,
+                stop_criteria=stop_criteria
+                )
+        else:
+            if self.opp:
+                if not (gen_mode == GenerationMode.SAMPLE or gen_mode == GenerationMode.GREEDY_SEARCH):
+                    print("WARNING: Opportunistic mode requires SAMPLE or GREEDY_SEARCH generation mode.")
+                if not batch_size == 1:
+                    print("WARNING: Opportunistic mode requires batch_size of 1.")
             # Use generate from transformers library for other modes
         generated_ids = self.model.generate(
             **inputs, 
@@ -110,19 +117,16 @@ class HuggingFaceModel:
         )
         batch_completions = []
 
-        # TODO: Move this to CodeEval
+        # Total tokens generated
+        self.total_tokens = 0
         for i in range(batch_size):
-            raw_completion = self.tokenizer.decode(generated_ids[i][input_ids_cutoff:len(generated_ids[i])], skip_special_tokens=True)                                       
+            self.total_tokens += len(generated_ids[i])-input_ids_cutoff+1
+            completion = self.tokenizer.decode(generated_ids[i][input_ids_cutoff:len(generated_ids[i])], skip_special_tokens=True)
 
-            # Post-processing to filter out using stop word (e.g. "\n\n")
-            if self.grammar != None and self.grammar.name == "python":
-                completion = self.postproces_completion_python(i, batch_size, input_ids_cutoff, generated_ids, self.grammar_decoder, raw_completion)
-            elif self.grammar != None and self.grammar.name == "go": 
-                completion = self.postproces_completion_go(i, batch_size, raw_completion, generated_ids, self.grammar_decoder, input_ids_cutoff)
-            else: # TODO: handle the case for other grammars
-                completion = raw_completion
-
-            batch_completions.append(completion)
+            if return_token_ids:
+                batch_completions.append((completion, generated_ids[i], inputs.input_ids))
+            else:                                       
+                batch_completions.append(completion)
         
         return batch_completions
 
@@ -260,47 +264,6 @@ class HuggingFaceModel:
 
         return completion
 
-
-    def postproces_completion_python(self, i, batch_size, input_ids_cutoff, generated_ids, grammar_decoder, raw_completion):
-        stop_word = "\n\n"
-        if stop_word in raw_completion or self.tokenizer.eos_token_id == generated_ids[i][-1] or grammar_decoder is None:
-            completion = filter_code(fix_indents(raw_completion))
-        else:
-            # Use when the stop word does not exist in the completion and grammar_decoder is used
-            function_incomplete = [False for _ in range(batch_size)]
-            completion = self.compute_backup_completion(grammar_decoder, function_incomplete, i, input_ids_cutoff, generated_ids)
-        return completion
-
-    def postproces_completion_go(self, i, batch_size, raw_completion, generated_ids, grammar_decoder, input_ids_cutoff):
-        extra_stop_word = "\n\n"
-        
-        if self.mode == "original": 
-            # only filter with stop-word for original mode
-            completion = filter_code(raw_completion, extra_stop_word=extra_stop_word)
-        else:
-            # When the grammar_decoder is used
-            function_incomplete = [False for _ in range(batch_size)]
-            completion = self.compute_backup_completion(grammar_decoder, function_incomplete, i, input_ids_cutoff, generated_ids)
-
-            if function_incomplete[i]:
-                # if the function is incomplete, then we need to add a closing brace
-                completion += "}"
-
-        return completion
-
-    def compute_backup_completion(self, grammar_decoder, function_incomplete, i, input_ids_cutoff, generated_ids):
-        if grammar_decoder.function_end[i] is not None:
-            # if the function end is not None, then the last valid state is the function end
-            last_token_id = grammar_decoder.function_end[i]
-        else:
-            # otherwise, the last valid state is the last valid state
-            function_incomplete[i] = True
-            last_token_id = grammar_decoder.last_valid_state[i]
-        # return last_token_id
-        # Use when the stop word does not exist in the completion
-        backup_completion = self.tokenizer.decode(generated_ids[i][input_ids_cutoff-1:last_token_id],
-        skip_special_tokens=True)[1:]  
-        return backup_completion
     
     def tokenize(self, s: str) -> 'Iterable[int]':
         return self.tokenizer.encode(s, add_special_tokens=False)
