@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import syncode.common as common
 from transformers import LogitsProcessor, PreTrainedTokenizer
@@ -39,9 +38,6 @@ class SyncodeLogitsProcessor(LogitsProcessor):
         self.logger = logger
         self.dev_mode = dev_mode
         self.batch_size = num_samples
-
-        # For keeping the generated input_ids on the CPU
-        self.input_ids: np.ndarray = np.array([[]])
 
         # For backtracking to syntactically valid completions
         self.last_valid_state: list = []
@@ -95,10 +91,9 @@ class SyncodeLogitsProcessor(LogitsProcessor):
         self.last_valid_state = [0 for _ in range(self.batch_size)]
         self.function_ends = [None for _ in range(self.batch_size)]
 
-        prompt_tokens = self.tokenizer.encode(prompt, return_tensors='pt')
-        self.input_ids = prompt_tokens.numpy()
+        prompt_tokens = self.tokenizer.encode(prompt, return_tensors='pt')[0]
         if self.parse_output_only:
-            self.start_from = len(prompt_tokens[0])
+            self.start_from = len(prompt_tokens)
         else:
             self.start_from = 0
 
@@ -178,12 +173,8 @@ class SyncodeLogitsProcessor(LogitsProcessor):
         return scores
 
     def _get_partial_codes(self, input_ids: torch.LongTensor):   
-        assert self.start_from <= input_ids.size(1), "Make sure that the decoder is reset for new prompt."
-        # Only copy the last-generated token from the GPU to the CPU
-        newest_input_ids = input_ids[:, -1].cpu().unsqueeze(dim=0).T.numpy()
-        # FIXME: np.append copies the entire array every time
-        self.input_ids = np.append(self.input_ids, newest_input_ids, axis=-1)
-        partial_codes = self.tokenizer.batch_decode(self.input_ids[:, self.start_from:], skip_special_tokens=True)
+        assert self.start_from <= input_ids.size(1), "Make sure that the decoder is reset for new prompt."            
+        partial_codes = self.tokenizer.batch_decode(input_ids[:, self.start_from:], skip_special_tokens=True)
         return partial_codes
 
     def update_valid_state(self, partial_code: str, idx: int, r: ParseResult):
