@@ -28,6 +28,8 @@ logits_processor.reset(prompt)
 # Profile the generation of responding to the prompt.
 with profile(
     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    with_modules=True,
+    with_stack=True
 ) as p:
     outputs = model.generate(
         **inputs, logits_processor=[logits_processor], max_new_tokens=50
