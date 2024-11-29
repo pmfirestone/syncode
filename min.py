@@ -4,9 +4,8 @@
 import tempfile
 import re
 import json
-from torch.profiler import profile, ProfilerActivity
 
-# syncode must be installed by pip.
+import torch
 from syncode import SyncodeLogitsProcessor, Grammar
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -24,6 +23,27 @@ prompt = '''def print_prime(n):
 '''
 inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
 logits_processor.reset(prompt)
+
+def time_callable(func: callable) -> float:
+    """Time how long a GPU func takes."""
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    func()
+    end_event.record()
+    torch.cuda.synchronize()  # Wait for the events to be recorded!
+    return start_event.elapsed_time(end_event)
+
+
+syncode_times = [time_callable(lambda: model.generate(
+        **inputs, logits_processor=[logits_processor], max_new_tokens=50
+)) for _ in range(10)]
+
+
+vanilla_times = [time_callable(lambda: model.generate(
+        **inputs, max_new_tokens=50
+)) for _ in range(10)]
+
 
 # Profile the generation of responding to the prompt.
 with profile(
