@@ -11,7 +11,7 @@ from syncode.parsers.grammars.grammar import Grammar
 
 class TestDFAMaskLlama(unittest.TestCase):
 
-    model = 'Llama-7b'
+    model = 'meta-llama/Llama-2-7b'
     tokenizer = common.load_tokenizer(model)
     dfa_mask = DFAMaskStore.load_dfa_mask_store(grammar=Grammar('python'), tokenizer=tokenizer, use_cache=True, logger=common.EmptyLogger())
 
