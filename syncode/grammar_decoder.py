@@ -135,6 +135,28 @@ class SyncodeLogitsProcessor(LogitsProcessor):
             self.update_valid_state(partial_code, 0, r)
 
         return is_valid
+
+
+    def get_accept_mask(self, input_ids: torch.LongTensor) -> torch.FloatTensor:
+        # start_from is used for choosing where the parsing should start
+        partial_codes = self._get_partial_codes(input_ids)
+
+        accept_masks = []
+
+        for idx, partial_code in enumerate(partial_codes):
+            ## Parsing
+            try: # returns the accept sequences that are currently accepted.
+                r = self.inc_parser.get_acceptable_next_terminals(partial_code)
+                self.update_valid_state(partial_code, idx, r)
+            except Exception as e:
+                if self.dev_mode == True:
+                    raise e
+                self.logger.log(f"Exception while parsing:\n {e}")
+                continue  # Skip altering the scores for this batch
+
+            accept_masks.append(self.dfa_mask_store.get_accept_mask(r, logger=self.logger))
+
+        return torch.stack(accept_masks)
     
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:    
