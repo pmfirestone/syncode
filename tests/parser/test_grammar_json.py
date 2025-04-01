@@ -1,7 +1,7 @@
 import unittest
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.realpath(__file__)) + '/../')
+sys.path.append(os.path.dirname(os.path.realpath(__file__)) + '/../..')
 from syncode.parsers import create_parser
 from syncode.parsers.grammars.grammar import Grammar
 from syncode.parse_result import AcceptSequence, RemainderState
@@ -25,4 +25,13 @@ class TestJSONParser(unittest.TestCase):
         r = inc_parser.get_acceptable_next_terminals(partial_code)
         assert r.remainder == ''
         assert r.remainder_state == RemainderState.COMPLETE
-        
+    
+    def test_json_parser3(self):
+        # Tests when the last incomplete word is unparsed
+        inc_parser.reset()
+        partial_code = '{\n  "key'
+        r = inc_parser.get_acceptable_next_terminals(partial_code)
+        assert AcceptSequence(['NONEMPTY_STRING']) in r.accept_sequences
+
+if __name__ == '__main__':
+    unittest.main()

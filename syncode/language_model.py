@@ -2,8 +2,8 @@ from ast import Tuple
 import time
 import torch
 import syncode.common as common
-from syncode.grammar_decoder import SyncodeLogitsProcessor
-from transformers import LogitsProcessorList, StoppingCriteriaList, StoppingCriteria
+from syncode.grammar_mask.logits_processor import SyncodeLogitsProcessor
+from transformers import LogitsProcessorList, StoppingCriteriaList, StoppingCriteria, PreTrainedModel
 from syncode.parsers.grammars import Grammar
 from syncode.utils.generation import filter_code, fix_indents
 from typing import Callable, Iterable, Union
@@ -48,17 +48,16 @@ class HuggingFaceModel:
         super().__init__()
 
         self.prompt_template = prompt_template
-        self.model = model
+        self.model: PreTrainedModel = model
         self.tokenizer = tokenizer
         self.device = device
         self.best_of = best_of
         self._before_prediction_hook = before_prediction_hook
-        self.grammar_decoder = grammar_decoder
-        self.grammar_processor: Iterable = LogitsProcessorList([self.grammar_decoder]) if self.grammar_decoder is not None else None
+        self.logits_processor = grammar_decoder
+        self.grammar_processor: Iterable = LogitsProcessorList([self.logits_processor]) if self.logits_processor is not None else None
 
         self.mode = mode
         self.grammar = grammar
-        self.vocab = common.get_vocab_from_tokenizer(self.tokenizer)
         self.gen_args = kwargs
         self.opp = opp
 
@@ -86,11 +85,11 @@ class HuggingFaceModel:
             return_token_ids (bool): If True, returns the token ids of the completions.
             debug (bool): If True, prints debug information.
         '''        
-        inputs, prompt_str = self.get_tokenized_input(prompt, batch_size)
+        inputs = self.get_tokenized_input(prompt, batch_size)
 
         # Reset the grammar decoder
-        if self.grammar_decoder is not None:
-            self.grammar_decoder.reset(prompt_str)
+        if self.logits_processor is not None:
+            self.logits_processor.reset()
 
         input_ids_cutoff = inputs.input_ids.size(dim=1)
         
@@ -113,7 +112,7 @@ class HuggingFaceModel:
                 inputs, 
                 gen_config, 
                 gen_mode, 
-                grammar_decoder=self.grammar_decoder,
+                grammar_decoder=self.logits_processor,
                 stop_criteria=stop_criteria,
                 debug=debug
                 )
@@ -123,6 +122,12 @@ class HuggingFaceModel:
                     print("WARNING: Opportunistic mode requires SAMPLE or GREEDY_SEARCH generation mode.")
                 if not batch_size == 1:
                     print("WARNING: Opportunistic mode requires batch_size of 1.")
+            
+            # Ensure pad_token_id is set
+            if 'pad_token_id' not in dir(self.tokenizer):
+                if self.tokenizer.pad_token_id is None:
+                    self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
             # Use generate from transformers library for other modes
             generated_ids = self.model.generate(
                 **inputs, 
@@ -169,7 +174,7 @@ class HuggingFaceModel:
         input_batch = [prompt_str for _ in range(batch_size)]
         inputs = self.tokenizer(input_batch, return_tensors="pt").to(self.model.device)
 
-        return inputs, prompt_str
+        return inputs
 
     @torch.inference_mode()
     def _generate(
@@ -188,9 +193,12 @@ class HuggingFaceModel:
         
         # This does not include grammar decoder
         self.model._prepare_special_tokens(gen_config, False, device=self.device)
-        logits_processor = self.model._get_logits_processor(gen_config, token_ids.size(1), token_ids, prefix_allowed_tokens_fn=None, logits_processor=[])
+
+        # Add logits processor for generation parameters such as top_k, top_p, temperature, etc.
+        logits_processor = self.model._get_logits_warper(gen_config, self.device)
 
         max_tokens = self.gen_args['max_new_tokens']+token_ids.size(1)
+        self.model.config.pad_token_id = pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
 
         while True:
             try:
