@@ -1,17 +1,22 @@
 // src/lib.rs
+//! [SynCode](https://arxiv.org/abs/2403.01632) is a library for constrained
+//! generation. It forces an LLM to generate sequences that satisfy a given LR
+//! grammar.
+mod dfa;
 mod lexer;
+mod mask;
 mod parser;
-mod python_bindings;
-mod util;
+// mod python_bindings;
+// mod util;
 
-use pyo3::prelude::*;
-use python_bindings::{PyLexerToken, RustLexer, RustParser};
+// use pyo3::prelude::*;
+// use python_bindings::{PyLexerToken, RustLexer, RustParser};
 
-/// A Python module implemented in Rust.
-#[pymodule]
-fn rust_parser(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<RustLexer>()?;
-    m.add_class::<RustParser>()?;
-    m.add_class::<PyLexerToken>()?;
-    Ok(())
-}
+// /// A Python module implemented in Rust.
+// #[pymodule]
+// fn rust_parser(_py: Python, m: &PyModule) -> PyResult<()> {
+//     m.add_class::<RustLexer>()?;
+//     m.add_class::<RustParser>()?;
+//     m.add_class::<PyLexerToken>()?;
+//     Ok(())
+// }

@@ -1,10 +1,11 @@
 // src/python_bindings.rs
+//! Python bindings for SynCode's Rust implementation.
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySet};
 use std::collections::{HashMap, HashSet};
 
-use crate::lexer::{LexResult, Lexer, LexerError, Pattern, TerminalDef, Token};
-use crate::parser::{Action, ParseConf, ParseResult, ParseTable, Parser, ParserError, Rule};
+use crate::lexer::{Lexer, Terminal, Token};
+use crate::parser::{Parser, ParserError, Rule};
 use crate::util;
 
 // Python representation of a lexer token
@@ -198,20 +199,31 @@ impl RustLexer {
             // Extract flags if available
             let flags = if let Some(flags_obj) = pattern_dict.get_item("flags") {
                 let flags_set = flags_obj.extract::<&PySet>()?;
-                let mut flags_set_rust = HashSet::new();
+                let mut flags_set_rust = Vec::new();
                 for flag in flags_set.iter() {
-                    flags_set_rust.insert(flag.extract::<String>()?);
+                    flags_set_rust.push(flag.extract::<String>()?);
                 }
-                flags_set_rust
+                flags_set_rust.sort()
             } else {
-                HashSet::new()
+                Vec::new()
             };
 
             // Create the pattern
             let pattern = if pattern_type == "str" {
-                Pattern::Str(pattern_value)
+                pattern_value
             } else if pattern_type == "re" {
-                Pattern::Regex(pattern_value, flags)
+                let mut regex_pattern = String::new();
+                if flags.contains("i") {
+                    regex_pattern.push_str("(?i)");
+                }
+                if flags.contains("s") {
+                    regex_pattern.push_str("(?s)");
+                }
+                if flags.contains("m") {
+                    regex_pattern.push_str("(?m)");
+                }
+                regex_pattern.push_str(pattern_value);
+                regex_pattern
             } else {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unknown pattern type: {}",
@@ -220,7 +232,7 @@ impl RustLexer {
             };
 
             // Add to terminals
-            let terminal = TerminalDef {
+            let terminal = Terminal {
                 name,
                 pattern,
                 priority,
@@ -264,7 +276,7 @@ impl RustLexer {
 
         for token_result in rust_tokens {
             match token_result {
-                LexResult::Token(mut token) => {
+                Token::Token(mut token) => {
                     // Apply callback if exists
                     if let Some(callback) = self.callbacks.get(&token.type_name) {
                         // Convert to Python token
@@ -281,7 +293,7 @@ impl RustLexer {
                     let py_token = PyLexerToken::from(token).to_dict(py)?;
                     python_tokens.push(py_token);
                 }
-                LexResult::Error {
+                Token::Error {
                     error_type,
                     pos,
                     line,
@@ -293,7 +305,7 @@ impl RustLexer {
                         create_error_dict(py, &error_type, pos, line, column, allowed, char)?;
                     return Ok(vec![error_dict]);
                 }
-                LexResult::Eof { .. } => {
+                Token::Eof { .. } => {
                     // End of file reached, do not include in token list
                     break;
                 }
@@ -321,7 +333,11 @@ impl RustParser {
             lexer: Lexer::new(), // Initialize an empty lexer
         }
     }
-    
+
+    /// Initialize the blank parser once it has been constructed.
+    // [pmf] Am I correct in thinking that the reason this isn't part of the
+    // constructor is that this requires the GIL token (the second argument)
+    // which the construtor does not?
     fn initialize(
         &mut self,
         py: Python<'_>,
@@ -384,7 +400,7 @@ impl RustParser {
             };
 
             // Add to terminals
-            let terminal = TerminalDef {
+            let terminal = Terminal {
                 name,
                 pattern,
                 priority,
@@ -439,7 +455,7 @@ impl RustParser {
         }
 
         // Create the parse table
-        let parse_table = util::load_parse_table(
+        let parse_table = util::load_parser(
             &self.rules,
             rust_states_dict,
             &start_symbol,

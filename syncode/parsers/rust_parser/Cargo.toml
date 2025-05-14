@@ -9,13 +9,13 @@ name = "rust_parser"
 crate-type = ["cdylib"]
 
 [dependencies]
-regex = "1.7.0"
+regex = "1.11.1"
 regex-automata = "0.4.9"
-pyo3 = { version = "0.18.3", features = ["extension-module"] }
+pyo3 = { version = "0.24.2", features = ["extension-module"] }
 
 [dev-dependencies]
 # For testing we need different features
-pyo3 = { version = "0.18.3", features = ["auto-initialize"] }
+pyo3 = { version = "0.24.2", features = ["auto-initialize"] }
 
 # This is the key part for testing PyO3 code
 [features]

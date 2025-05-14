@@ -1,11 +1,13 @@
+// src/mask.rd
+//! The mask store for SynCode, implementing the basic algorithm from the paper.
+
 use core::iter::Iterator;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use regex_automata::{dfa::Automaton, util::primitives::StateID};
 //use std::iter::zip;
+use crate::dfa::{DFABuilder, DFAState, all_dfa_states};
 use std::{collections::HashMap, vec::Vec};
-mod dfa;
-use dfa::{all_dfa_states, DFABuilder, DFAState};
 
 /// A struct to encapsulate a cache for building DFAs. This has too many layers
 /// of indirection; for now it's just proof of concept.
@@ -367,8 +369,9 @@ mod tests {
             store
                 .get(&(
                     starting_state,
-                    vec![r"\("// , r"\)"
-	    ]
+                    vec![
+                        r"\(" // , r"\)"
+                    ]
                 ))
                 .unwrap(),
             &vec![true, false, false, false, true, false],

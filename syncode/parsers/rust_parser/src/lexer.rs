@@ -1,48 +1,72 @@
 // src/lexer.rs
-use regex::Regex;
+//! The lexer for SynCode. The primary procedure for this module is `lex`
+//! (q.v.), which takes a text and returns a sequence of lexical tokens along
+//! with a "remainder". See the paper for more detail.
 use regex_automata::dfa::{Automaton, StartKind, dense};
 use regex_automata::{Anchored, util::start};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-/// Token struct to represent lexer tokens.
+/// A lexical token, what the lexer breaks the input into.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Token {
-    pub value: String,     // The content of the token.
-    pub type_name: String, // The type of the token in the grammar, "" if unlexable.
+pub struct Token<'a> {
+    /// The content of the token.
+    pub value: &'a str,
+    /// The type of terminal that this is in the grammar. None if this token
+    /// couldn't be lexed, which can happen in the case that this is the
+    /// unlexable remainder.
+    pub terminal: Option<Terminal<'a>>,
+    /// Where in the input the token begins.
     pub start_pos: usize,
+    /// Where in the input the token ends.
     pub end_pos: usize,
+    /// The line of the input the token begins on.
     pub line: usize,
-    pub column: usize,
+    /// The line of the input the token ends on.
     pub end_line: usize,
+    /// The column of the input the token begins on.
+    pub column: usize,
+    /// The column of the input the token ends on.
     pub end_column: usize,
 }
 
-impl fmt::Display for Token {
+impl fmt::Display for Token<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Token({}, {})", self.type_name, self.value)
+        write!(f, "Token({:?}, {})", self.terminal, self.value)
     }
 }
 
-/// Pattern types to match Lark's patterns.
-#[derive(Clone, Debug)]
-pub enum Pattern {
-    Str(String),
-    Regex(String, HashSet<String>), // regex pattern and flags
-}
-
-/// Terminal definition matching Lark's TerminalDef.
-#[derive(Clone, Debug)]
-pub struct TerminalDef {
-    pub name: String,
-    pub pattern: Pattern,
+/// A terminal of the grammar.
+///
+/// FIXME: As a future optimization, put as many of these as possible behind
+/// `Rc`s or `Arc`s, because they are immutable and are often copied or moved
+/// around.
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+pub struct Terminal<'a> {
+    /// The name of this terminal in the grammar.
+    pub name: &'a str,
+    /// The regex describing this terminal.
+    pub pattern: &'a str,
+    /// This terminal's priority in lexing.
     pub priority: i32,
 }
 
-/// A type to describe errors with the lexer object itself (e.g. invalid
-/// initialization).
+/// A type alias for nonterminals of the grammar, purely for readability.
+pub type NonTerminal<'a> = &'a str;
+
+impl fmt::Display for Terminal<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Terminal({}, {}, {})",
+            self.name, self.pattern, self.priority
+        )
+    }
+}
+
+/// A type to describe errors that can arise in lexing.
 #[derive(Debug, Clone)]
-pub enum LexerError {
+pub enum LexError {
     UnexpectedChar {
         pos: usize,
         line: usize,
@@ -60,36 +84,29 @@ pub enum LexerError {
 }
 
 /// Hold DFAs for the terminals in the grammar.
-pub struct Scanner {
-    // The DFA for matching patterns
+#[derive(Clone)]
+struct Scanner<'a> {
+    /// The DFA for matching patterns.
     dfa: dense::DFA<Vec<u32>>,
-
-    // Maps DFA match pattern to token type name
-    index_to_type: HashMap<usize, String>,
-
-    // Maps token type name to whether it can contain newlines
-    newline_types: HashSet<String>,
-
-    // Terminal definitions for reference
-    terminals: Vec<TerminalDef>,
-
-    // All allowed types
-    pub allowed_types: HashSet<String>,
+    /// Maps DFA match pattern to the TerminalDef it represents.
+    index_to_type: HashMap<usize, Terminal<'a>>,
+    /// Maps token type name to whether it can contain newlines.
+    newline_types: HashSet<&'a str>,
+    /// Terminal definitions for reference.
+    terminals: Vec<Terminal<'a>>,
+    /// All allowed types.
+    pub allowed_types: HashSet<&'a str>,
 }
 
-impl Scanner {
-    pub fn new(terminals: Vec<TerminalDef>) -> Result<Self, LexerError> {
+impl<'a> Scanner<'a> {
+    pub fn new(terminals: Vec<Terminal<'a>>) -> Result<Self, LexError> {
         let mut newline_types = HashSet::new();
         let mut allowed_types = HashSet::with_capacity(terminals.len());
         let mut index_to_type = HashMap::with_capacity(terminals.len());
 
         // Determine which patterns might contain newlines
         for terminal in &terminals {
-            let pattern_str = match &terminal.pattern {
-                Pattern::Str(s) => s,
-                Pattern::Regex(r, _) => r,
-            };
-
+            let pattern_str = terminal.pattern.clone();
             if pattern_str.contains("\\n")
                 || pattern_str.contains("\n")
                 || pattern_str.contains("\\s")
@@ -111,17 +128,7 @@ impl Scanner {
             }
 
             // If priorities are equal, sort by pattern length (descending)
-            let len_a = match &a.pattern {
-                Pattern::Str(s) => s.len(),
-                Pattern::Regex(_, _) => 0,
-            };
-
-            let len_b = match &b.pattern {
-                Pattern::Str(s) => s.len(),
-                Pattern::Regex(_, _) => 0,
-            };
-
-            len_b.cmp(&len_a)
+            b.pattern.len().cmp(&a.pattern.len())
         });
 
         // Create patterns for the DFA
@@ -129,36 +136,9 @@ impl Scanner {
 
         // Process each terminal
         for (i, terminal) in sorted_terminals.iter().enumerate() {
-            index_to_type.insert(i, terminal.name.clone());
-
-            let pattern = match &terminal.pattern {
-                Pattern::Str(s) => {
-                    // For string literals, escape special regex chars
-                    format!("{}", regex::escape(s))
-                }
-                Pattern::Regex(pattern, flags) => {
-                    // For regex patterns, apply flags
-                    let mut regex_pattern = String::new();
-                    if flags.contains("i") {
-                        regex_pattern.push_str("(?i)");
-                    }
-                    if flags.contains("s") {
-                        regex_pattern.push_str("(?s)");
-                    }
-                    if flags.contains("m") {
-                        regex_pattern.push_str("(?m)");
-                    }
-
-                    regex_pattern.push_str(pattern);
-                    regex_pattern
-                }
-            };
-
-            patterns.push(pattern);
+            index_to_type.insert(i, terminal.clone());
+            patterns.push(terminal.pattern);
         }
-
-        // Convert patterns to string references
-        let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
 
         // Build the DFA
         let dfa = dense::Builder::new()
@@ -167,8 +147,8 @@ impl Scanner {
                     .minimize(true) // Minimize the DFA for better performance
                     .start_kind(StartKind::Anchored),
             ) // Only match from the start of the input
-            .build_many(&pattern_refs)
-            .map_err(|e| LexerError::RegexError(format!("Failed to build DFA: {}", e)))?;
+            .build_many(&patterns)
+            .map_err(|e| LexError::RegexError(format!("Failed to build DFA: {}", e)))?;
 
         Ok(Scanner {
             dfa,
@@ -180,9 +160,10 @@ impl Scanner {
     }
 
     /// Match the next token in the input, beginning at position pos, and
-    /// return it along with the type of terminal that it is. Look for the
-    /// longest possible match.
-    pub fn match_token<'a>(&self, text: &'a str, pos: usize) -> Option<(&'a str, &str)> {
+    /// return it along with the type of terminal that it is.
+    ///
+    /// Look for the longest possible match.
+    pub fn match_token(&self, text: &'a str, pos: usize) -> Option<(&'a str, &Terminal)> {
         if pos >= text.len() {
             return None;
         }
@@ -230,8 +211,8 @@ impl Scanner {
 
         // Return the best match found as string slices
         if let Some((pattern_idx, match_len)) = best_match {
-            if let Some(type_name) = self.index_to_type.get(&pattern_idx) {
-                return Some((&rest[..match_len], type_name.as_str()));
+            if let Some(terminal) = self.index_to_type.get(&pattern_idx) {
+                return Some((&rest[..match_len], terminal));
             }
         }
 
@@ -239,15 +220,20 @@ impl Scanner {
     }
 }
 
-/// Main Lexer struct.
-pub struct Lexer {
-    scanner: Option<Scanner>,
-    terminals: Vec<TerminalDef>,
-    ignore_types: HashSet<String>,
-    newline_types: HashSet<String>,
+/// A lexer.
+#[derive(Clone)]
+pub struct Lexer<'a> {
+    /// The machinery for the DFAs.
+    scanner: Option<Scanner<'a>>,
+    /// The terminals this lexer recognizes.
+    pub terminals: Vec<Terminal<'a>>,
+    /// The terminals that this lexer ignores.
+    pub ignore_types: HashSet<Terminal<'a>>,
+    /// The terminals that contain newlines.
+    pub newline_types: HashSet<Terminal<'a>>,
 }
 
-impl Lexer {
+impl<'a> Lexer<'a> {
     pub fn new() -> Self {
         Lexer {
             scanner: None,
@@ -259,25 +245,20 @@ impl Lexer {
 
     pub fn initialize(
         &mut self,
-        terminals: Vec<TerminalDef>,
-        ignore_types: HashSet<String>,
-    ) -> Result<(), LexerError> {
+        terminals: Vec<Terminal<'a>>,
+        ignore_types: HashSet<Terminal<'a>>,
+    ) -> Result<(), LexError> {
         self.ignore_types = ignore_types;
 
         // Determine which patterns might contain newlines
         for terminal in &terminals {
-            let pattern_str = match &terminal.pattern {
-                Pattern::Str(s) => s,
-                Pattern::Regex(r, _) => r,
-            };
-
-            if pattern_str.contains("\\n")
-                || pattern_str.contains("\n")
-                || pattern_str.contains("\\s")
-                || pattern_str.contains("[^")
-                || (pattern_str.contains(".") && pattern_str.contains("(?s"))
+            if terminal.pattern.contains("\\n")
+                || terminal.pattern.contains("\n")
+                || terminal.pattern.contains("\\s")
+                || terminal.pattern.contains("[^")
+                || (terminal.pattern.contains(".") && terminal.pattern.contains("(?s"))
             {
-                self.newline_types.insert(terminal.name.clone());
+                self.newline_types.insert(terminal.clone());
             }
         }
 
@@ -293,20 +274,28 @@ impl Lexer {
     }
 
     /// Get the next token from text, updating pos, line, and column to the end
-    /// (?) of the new token.
+    /// of the new token. Return a flag saying whether or not this token is the remainder.
+    // An alternative design would be to distinguish between remainder and
+    // non-remainder by adding a member to the Token struct, or by using an
+    // entirely different type for it. Since the remainder and lexed sequence
+    // are generally handled separately, I think it's best to simply flag to
+    // the caller (`lex`, which is the outer loop here) whether or not this
+    // procedure is returning the remainder. Then that procedure returns a
+    // pair, and its caller in turn unpacks that pair. This keeps the notation
+    // in the code similar to that in the paper.
     fn next_token(
-        &self,
-        text: &str,
+        &'a self,
+        text: &'a str,
         mut pos: usize,
         mut line: usize,
         mut column: usize,
         //        last_token: Option<&Token>,
-    ) -> Result<(Token, bool), LexerError> {
+    ) -> Result<(Token<'a>, bool), LexError> {
         // Ensure scanner is initialized
         let scanner = match &self.scanner {
             Some(s) => s,
             None => {
-                return Err(LexerError::InitError(
+                return Err(LexError::InitError(
                     "Scanner not initialized. Call initialize() first.".to_string(),
                 ));
             }
@@ -314,13 +303,12 @@ impl Lexer {
 
         loop {
             // Try to match next token
-            if let Some((value, type_name)) = scanner.match_token(text, pos) {
-                // Note: type_name is now &str, not String, so we don't use & prefix
-                let ignored = self.ignore_types.contains(type_name);
+            if let Some((value, terminal)) = scanner.match_token(text, pos) {
+                let ignored = self.ignore_types.contains(terminal);
 
                 // If this token is ignored, update position and continue the loop
                 if ignored {
-                    let contains_newline = self.newline_types.contains(type_name);
+                    let contains_newline = self.newline_types.contains(terminal);
 
                     // Update line and column information
                     if contains_newline {
@@ -349,7 +337,7 @@ impl Lexer {
                 let start_column = column;
 
                 // Calculate end line and column
-                let contains_newline = self.newline_types.contains(type_name);
+                let contains_newline = self.newline_types.contains(terminal);
                 let (end_line, end_column) = if contains_newline {
                     // Calculate for tokens with newlines
                     let mut current_line = line;
@@ -372,8 +360,8 @@ impl Lexer {
 
                 return Ok((
                     Token {
-                        value: value.to_string(),         // Convert &str to String
-                        type_name: type_name.to_string(), // Convert &str to String
+                        value,
+                        terminal: Some(terminal.clone()),
                         start_pos,
                         end_pos,
                         line: start_line,
@@ -384,17 +372,19 @@ impl Lexer {
                     false,
                 ));
             } else {
-                // No match found. Suppose that everything left is the
-                // remainder, which requires us to assume that the string does
-                // not diverge from the grammar at any previous
-                // point. Otherwise, you could end up with a broken token in
-                // the middle of a sequence of otherwise lexable forms (e.g. `1
-                // + 0x + 3` in Python). If SynCode is doing its job correctly,
-                // such a string should never be generated.
+                // No match found. Return what's left as the unlexed
+                // remainder. The parser will pass this on to the mask store,
+                // where, if there's a real error, it will finally be
+                // detected. For now, we avoid duplicating the logic necessary
+                // to check whether we are dealing with the prefix of a lexical
+                // token that may someday become valid or a truly irredeemable
+                // error: this will be detected when we attempt partial matches
+                // in the mask store.
+                let value = &text[pos..];
                 return Ok((
                     Token {
-                        type_name: "".to_string(),
-                        value: text[pos..].to_string(),
+                        value,
+                        terminal: None,
                         start_pos: pos,
                         end_pos: text.len(),
                         line,
@@ -415,9 +405,9 @@ impl Lexer {
     /// token, in the case where the entire input could be lexed, or the
     /// unlexable suffix, in the case where the end of the input could not be
     /// lexed.
-    pub fn lex_text(&self, text: &str) -> Result<(Vec<Token>, Token), LexerError> {
+    pub fn lex(&'a self, text: &'a str) -> Result<(Vec<Token<'a>>, Token<'a>), LexError> {
         if self.scanner.is_none() {
-            return Err(LexerError::InitError(
+            return Err(LexError::InitError(
                 "Scanner not initialized. Call initialize() first.".to_string(),
             ));
         }
@@ -478,28 +468,86 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    // Terminal definitions to be used throughout tests.
+    const WORD: Terminal = Terminal {
+        name: "WORD",
+        pattern: r"[a-zA-Z_]\w*",
+        priority: 2,
+    };
+
+    const STRING: Terminal = Terminal {
+        name: "STRING",
+        pattern: r#"("""[^"]*"""|'''[^']*''')"#,
+        priority: 2,
+    };
+
+    const SPACE: Terminal = Terminal {
+        name: "SPACE",
+        pattern: "\\s+",
+        priority: 0,
+    };
+
+    const EQUALS: Terminal = Terminal {
+        name: "EQUALS",
+        pattern: "=",
+        priority: 1,
+    };
+
+    const DOT: Terminal = Terminal {
+        name: "DOT",
+        pattern: r"\.",
+        priority: 1,
+    };
+
+    const DEC_NUMBER: Terminal = Terminal {
+        name: "DEC_NUMBER",
+        pattern: r"0|[1-9]\d*",
+        priority: 1,
+    };
+
+    const OCT_NUMBER: Terminal = Terminal {
+        name: "OCT_NUMBER",
+        pattern: r"(?i)0o[0-7]+",
+        priority: 1,
+    };
+
+    const BIN_NUMBER: Terminal = Terminal {
+        name: "BIN_NUMBER",
+        pattern: r"(?i)0b[0-1]+",
+        priority: 1,
+    };
+
+    const HEX_NUMBER: Terminal = Terminal {
+        name: "HEX_NUMBER",
+        pattern: r"(?i)0x[\da-f]+",
+        priority: 1,
+    };
+
+    const FLOAT_NUMBER: Terminal = Terminal {
+        name: "FLOAT_NUMBER",
+        pattern: r"((\d+\.\d*|\.\d+)(e[-+]?\d+)?|\d+(e[-+]?\d+))",
+        priority: 1,
+    };
+
+    const SEMICOLON: Terminal = Terminal {
+        name: "SEMICOLON",
+        pattern: ";",
+        priority: 0,
+    };
+
+    const NEWLINE: Terminal = Terminal {
+        name: "NEWLINE",
+        pattern: r"\n",
+        priority: 1,
+    };
+
     #[test]
     fn lexer_initialization() {
         let mut lexer = Lexer::new();
 
-        // Create terminal definitions
-        let word_pattern = Pattern::Regex("\\w+".to_string(), HashSet::new());
-        let space_pattern = Pattern::Regex("\\s+".to_string(), HashSet::new());
+        let terminal_defs = vec![WORD, SPACE];
 
-        let terminal_defs = vec![
-            TerminalDef {
-                name: "WORD".to_string(),
-                pattern: word_pattern,
-                priority: 1,
-            },
-            TerminalDef {
-                name: "SPACE".to_string(),
-                pattern: space_pattern,
-                priority: 0,
-            },
-        ];
-
-        let ignore_types = HashSet::from(["SPACE".to_string()]);
+        let ignore_types = HashSet::from([SPACE]);
 
         // Initialize the lexer
         lexer.initialize(terminal_defs, ignore_types).unwrap();
@@ -514,40 +562,25 @@ mod tests {
     fn simple_lexing() {
         let mut lexer = Lexer::new();
 
-        // Create terminal definitions
-        let word_pattern = Pattern::Regex("\\w+".to_string(), HashSet::new());
-        let space_pattern = Pattern::Regex("\\s+".to_string(), HashSet::new());
+        let terminal_defs = vec![WORD, SPACE];
 
-        let terminal_defs = vec![
-            TerminalDef {
-                name: "WORD".to_string(),
-                pattern: word_pattern,
-                priority: 1,
-            },
-            TerminalDef {
-                name: "SPACE".to_string(),
-                pattern: space_pattern,
-                priority: 0,
-            },
-        ];
-
-        let ignore_types = HashSet::from(["SPACE".to_string()]);
+        let ignore_types = HashSet::from([SPACE]);
 
         // Initialize the lexer
         lexer.initialize(terminal_defs, ignore_types).unwrap();
 
         // Lex a simple text
-        let tokens = lexer.lex_text("hello world").unwrap();
+        let tokens = lexer.lex("hello world").unwrap();
 
         // Should have 2 tokens: "hello" and "world"
         // (plus one EOF marker)
         assert_eq!(tokens.0.len(), 2);
 
         assert_eq!(tokens.0[0].value, "hello");
-        assert_eq!(tokens.0[0].type_name, "WORD");
+        assert_eq!(tokens.0[0].terminal, Some(WORD));
 
         assert_eq!(tokens.0[1].value, "world");
-        assert_eq!(tokens.0[1].type_name, "WORD");
+        assert_eq!(tokens.0[1].terminal, Some(WORD));
 
         // The remainder should be the last token in the input.
         assert_eq!(tokens.0[1], tokens.1);
@@ -557,233 +590,133 @@ mod tests {
     fn complex_string_literals() {
         let mut lexer = Lexer::new();
 
-        // Create pattern for simpler string literals without lookbehind
-        let string_pattern =
-            Pattern::Regex(r#"("""[^"]*"""|'''[^']*''')"#.to_string(), HashSet::new());
+        let terminal_defs = vec![STRING, WORD, EQUALS, DOT, SPACE];
 
-        // Simple word pattern for other text
-        let word_pattern = Pattern::Regex("\\w+".to_string(), HashSet::new());
-        let space_pattern = Pattern::Regex("\\s+".to_string(), HashSet::new());
-        let equals_pattern = Pattern::Str("=".to_string());
-        let dot_pattern = Pattern::Str(".".to_string());
-
-        let terminal_defs = vec![
-            TerminalDef {
-                name: "STRING".to_string(),
-                pattern: string_pattern,
-                priority: 2,
-            },
-            TerminalDef {
-                name: "WORD".to_string(),
-                pattern: word_pattern,
-                priority: 1,
-            },
-            TerminalDef {
-                name: "EQUALS".to_string(),
-                pattern: equals_pattern,
-                priority: 1,
-            },
-            TerminalDef {
-                name: "DOT".to_string(),
-                pattern: dot_pattern,
-                priority: 1,
-            },
-            TerminalDef {
-                name: "SPACE".to_string(),
-                pattern: space_pattern,
-                priority: 0,
-            },
-        ];
-
-        let ignore_types = HashSet::from(["SPACE".to_string()]);
+        let ignore_types = HashSet::from([SPACE]);
 
         // Initialize the lexer
         lexer.initialize(terminal_defs, ignore_types).unwrap();
 
         // Test a simple triple-quoted string
         let text = r#"x = """This is a simple string"""."#;
-        let tokens = lexer.lex_text(text).unwrap();
+        let tokens = lexer.lex(text).unwrap();
 
         // Extract token types
-        let token_types: Vec<String> = tokens
+        let token_types: Vec<Terminal> = tokens
             .0
             .iter()
-            .map(|token| token.type_name.clone())
+            .map(|token| token.terminal.clone().unwrap())
             .collect();
 
         // Expected: WORD, EQUALS, STRING, DOT
-        assert_eq!(
-            token_types,
-            vec![
-                "WORD".to_string(),
-                "EQUALS".to_string(),
-                "STRING".to_string(),
-                "DOT".to_string()
-            ]
-        );
+        assert_eq!(token_types, vec![WORD, EQUALS, STRING, DOT]);
     }
 
     #[test]
     fn numeric_literals() {
-        let mut lexer = Lexer::new();
-
-        // Create patterns for different numeric literals
-        let dec_number_pattern =
-            Pattern::Regex(r"0|[1-9]\d*".to_string(), HashSet::from(["i".to_string()]));
-        let hex_number_pattern =
-            Pattern::Regex(r"0x[\da-f]*".to_string(), HashSet::from(["i".to_string()]));
-        let oct_number_pattern =
-            Pattern::Regex(r"0o[0-7]*".to_string(), HashSet::from(["i".to_string()]));
-        let bin_number_pattern =
-            Pattern::Regex(r"0b[0-1]*".to_string(), HashSet::from(["i".to_string()]));
-        let float_number_pattern = Pattern::Regex(
-            r"((\d+\.\d*|\.\d+)(e[-+]?\d+)?|\d+(e[-+]?\d+))".to_string(),
-            HashSet::from(["i".to_string()]),
-        );
-
-        // Other patterns
-        let word_pattern = Pattern::Regex("\\w+".to_string(), HashSet::new());
-        let space_pattern = Pattern::Regex("\\s+".to_string(), HashSet::new());
-        let equal_pattern = Pattern::Str("=".to_string());
-        let semicolon_pattern = Pattern::Str(";".to_string());
-
         let terminal_defs = vec![
-            TerminalDef {
-                name: "FLOAT_NUMBER".to_string(),
-                pattern: float_number_pattern,
-                priority: 3,
-            },
-            TerminalDef {
-                name: "HEX_NUMBER".to_string(),
-                pattern: hex_number_pattern,
-                priority: 2,
-            },
-            TerminalDef {
-                name: "OCT_NUMBER".to_string(),
-                pattern: oct_number_pattern,
-                priority: 2,
-            },
-            TerminalDef {
-                name: "BIN_NUMBER".to_string(),
-                pattern: bin_number_pattern,
-                priority: 2,
-            },
-            TerminalDef {
-                name: "DEC_NUMBER".to_string(),
-                pattern: dec_number_pattern,
-                priority: 1,
-            },
-            TerminalDef {
-                name: "WORD".to_string(),
-                pattern: word_pattern,
-                priority: 0,
-            },
-            TerminalDef {
-                name: "EQUAL".to_string(),
-                pattern: equal_pattern,
-                priority: 0,
-            },
-            TerminalDef {
-                name: "SEMICOLON".to_string(),
-                pattern: semicolon_pattern,
-                priority: 0,
-            },
-            TerminalDef {
-                name: "SPACE".to_string(),
-                pattern: space_pattern,
-                priority: 0,
-            },
+            FLOAT_NUMBER,
+            HEX_NUMBER,
+            OCT_NUMBER,
+            BIN_NUMBER,
+            DEC_NUMBER,
+            WORD,
+            EQUALS,
+            SEMICOLON,
+            SPACE,
         ];
 
-        let ignore_types = HashSet::from(["SPACE".to_string()]);
-
-        // Initialize the lexer
-        lexer.initialize(terminal_defs, ignore_types).unwrap();
+        let ignore_types = HashSet::from([SPACE]);
 
         // Test cases for numeric literals
         let test_cases = vec![
             (
                 "x = 42;",
                 vec![
-                    ("WORD".to_string(), "x".to_string()),
-                    ("EQUAL".to_string(), "=".to_string()),
-                    ("DEC_NUMBER".to_string(), "42".to_string()),
-                    ("SEMICOLON".to_string(), ";".to_string()),
+                    (WORD, "x"),
+                    (EQUALS, "="),
+                    (DEC_NUMBER, "42"),
+                    (SEMICOLON, ";"),
                 ],
             ),
             (
                 "hex = 0xFF;",
                 vec![
-                    ("WORD".to_string(), "hex".to_string()),
-                    ("EQUAL".to_string(), "=".to_string()),
-                    ("HEX_NUMBER".to_string(), "0xFF".to_string()),
-                    ("SEMICOLON".to_string(), ";".to_string()),
+                    (WORD, "hex"),
+                    (EQUALS, "="),
+                    (HEX_NUMBER, "0xFF"),
+                    (SEMICOLON, ";"),
                 ],
             ),
             (
                 "oct = 0o77;",
                 vec![
-                    ("WORD".to_string(), "oct".to_string()),
-                    ("EQUAL".to_string(), "=".to_string()),
-                    ("OCT_NUMBER".to_string(), "0o77".to_string()),
-                    ("SEMICOLON".to_string(), ";".to_string()),
+                    (WORD, "oct"),
+                    (EQUALS, "="),
+                    (OCT_NUMBER, "0o77"),
+                    (SEMICOLON, ";"),
                 ],
             ),
             (
                 "bin = 0b1010;",
                 vec![
-                    ("WORD".to_string(), "bin".to_string()),
-                    ("EQUAL".to_string(), "=".to_string()),
-                    ("BIN_NUMBER".to_string(), "0b1010".to_string()),
-                    ("SEMICOLON".to_string(), ";".to_string()),
+                    (WORD, "bin"),
+                    (EQUALS, "="),
+                    (BIN_NUMBER, "0b1010"),
+                    (SEMICOLON, ";"),
                 ],
             ),
             (
                 "pi = 3.14159;",
                 vec![
-                    ("WORD".to_string(), "pi".to_string()),
-                    ("EQUAL".to_string(), "=".to_string()),
-                    ("FLOAT_NUMBER".to_string(), "3.14159".to_string()),
-                    ("SEMICOLON".to_string(), ";".to_string()),
+                    (WORD, "pi"),
+                    (EQUALS, "="),
+                    (FLOAT_NUMBER, "3.14159"),
+                    (SEMICOLON, ";"),
                 ],
             ),
             (
                 "e = 2.71e-3;",
                 vec![
-                    ("WORD".to_string(), "e".to_string()),
-                    ("EQUAL".to_string(), "=".to_string()),
-                    ("FLOAT_NUMBER".to_string(), "2.71e-3".to_string()),
-                    ("SEMICOLON".to_string(), ";".to_string()),
+                    (WORD, "e"),
+                    (EQUALS, "="),
+                    (FLOAT_NUMBER, "2.71e-3"),
+                    (SEMICOLON, ";"),
                 ],
             ),
             (
                 "val = .5;",
                 vec![
-                    ("WORD".to_string(), "val".to_string()),
-                    ("EQUAL".to_string(), "=".to_string()),
-                    ("FLOAT_NUMBER".to_string(), ".5".to_string()),
-                    ("SEMICOLON".to_string(), ";".to_string()),
+                    (WORD, "val"),
+                    (EQUALS, "="),
+                    (FLOAT_NUMBER, ".5"),
+                    (SEMICOLON, ";"),
                 ],
             ),
             (
                 "sci = 6.022e23;",
                 vec![
-                    ("WORD".to_string(), "sci".to_string()),
-                    ("EQUAL".to_string(), "=".to_string()),
-                    ("FLOAT_NUMBER".to_string(), "6.022e23".to_string()),
-                    ("SEMICOLON".to_string(), ";".to_string()),
+                    (WORD, "sci"),
+                    (EQUALS, "="),
+                    (FLOAT_NUMBER, "6.022e23"),
+                    (SEMICOLON, ";"),
                 ],
             ),
         ];
 
         for (text, expected_tokens) in test_cases {
-            let tokens = lexer.lex_text(text).unwrap();
+            // Make a new lexer every time through this loop to make the compiler happy.
+            let mut lexer = Lexer::new();
+            lexer
+                .initialize(terminal_defs.clone(), ignore_types.clone())
+                .unwrap();
+            let tokens = lexer.lex(text).unwrap();
 
             // Check token types and values (excluding EOF)
-            let token_info: Vec<(String, String)> = tokens
+            let token_info: Vec<(Terminal, &str)> = tokens
                 .0
                 .iter()
-                .map(|token| (token.type_name.clone(), token.value.clone()))
+                .map(|token| (token.terminal.clone().unwrap(), token.value))
                 .collect();
 
             assert_eq!(token_info, expected_tokens, "Failed for text: {}", text);
@@ -796,31 +729,15 @@ mod tests {
         // could be lexed all the way to the end, the remainder is the last
         // lexical terminal (because that could change its type with future
         // additions).
-        let terminals = vec![
-            TerminalDef {
-                name: "WORD".to_string(),
-                pattern: Pattern::Regex("[a-zA-Z_]\\w*".to_string(), HashSet::new()),
-                priority: 2,
-            },
-            TerminalDef {
-                name: "DEC_NUMBER".to_string(),
-                pattern: Pattern::Regex("\\d+".to_string(), HashSet::new()),
-                priority: 2,
-            },
-            TerminalDef {
-                name: "SPACE".to_string(),
-                pattern: Pattern::Regex("\\s+".to_string(), HashSet::new()),
-                priority: 0,
-            },
-        ];
+        let terminals = vec![WORD, DEC_NUMBER, SPACE];
 
-        let ignore_types = HashSet::from(["SPACE".to_string()]);
+        let ignore_types = HashSet::from([SPACE]);
 
         let mut lexer = Lexer::new();
         lexer.initialize(terminals, ignore_types).unwrap();
 
         let text = "123 ret";
-        let (tokens, remainder) = lexer.lex_text(text).unwrap();
+        let (tokens, remainder) = lexer.lex(text).unwrap();
 
         // We expect:
         // tokens: [123, ret]
@@ -828,8 +745,8 @@ mod tests {
         assert_eq!(
             tokens[0],
             Token {
-                value: "123".to_string(),
-                type_name: "DEC_NUMBER".to_string(),
+                value: "123",
+                terminal: Some(DEC_NUMBER),
                 start_pos: 0,
                 end_pos: 3,
                 line: 1,
@@ -842,8 +759,8 @@ mod tests {
         assert_eq!(
             tokens[1],
             Token {
-                value: "ret".to_string(),
-                type_name: "WORD".to_string(),
+                value: "ret",
+                terminal: Some(WORD),
                 start_pos: 4,
                 end_pos: 7,
                 line: 1,
@@ -858,35 +775,17 @@ mod tests {
 
     #[test]
     fn remainder_is_not_lexical_token() {
-        // In the case where the string could not be lexed all the way to the end, the remainder is unlexed suffix.
-        let terminals = vec![
-            TerminalDef {
-                name: "WORD".to_string(),
-                pattern: Pattern::Regex("[a-zA-Z_]\\w*".to_string(), HashSet::new()),
-                priority: 2,
-            },
-            TerminalDef {
-                name: "HEX_NUMBER".to_string(),
-                pattern: Pattern::Regex(
-                    r"0x[\da-f]+".to_string(),
-                    HashSet::from(["i".to_string()]),
-                ),
-                priority: 2,
-            },
-            TerminalDef {
-                name: "SPACE".to_string(),
-                pattern: Pattern::Regex("\\s+".to_string(), HashSet::new()),
-                priority: 0,
-            },
-        ];
+        // In the case where the string could not be lexed all the way to the
+        // end, the remainder is unlexed suffix.
+        let terminals = vec![WORD, HEX_NUMBER, SPACE];
 
-        let ignore_types = HashSet::from(["SPACE".to_string()]);
+        let ignore_types = HashSet::from([SPACE]);
 
         let mut lexer = Lexer::new();
         lexer.initialize(terminals, ignore_types).unwrap();
 
         let text = "return 0x";
-        let (tokens, remainder) = lexer.lex_text(text).unwrap();
+        let (tokens, remainder) = lexer.lex(text).unwrap();
 
         // We expect:
         // tokens: [return]
@@ -894,8 +793,8 @@ mod tests {
         assert_eq!(
             tokens[0],
             Token {
-                value: "return".to_string(),
-                type_name: "WORD".to_string(),
+                value: "return",
+                terminal: Some(WORD),
                 start_pos: 0,
                 end_pos: 6,
                 line: 1,
@@ -908,8 +807,8 @@ mod tests {
         assert_eq!(
             remainder,
             Token {
-                value: "0x".to_string(),
-                type_name: "".to_string(),
+                value: "0x",
+                terminal: None,
                 start_pos: 7,
                 end_pos: 9,
                 line: 1,
@@ -924,30 +823,9 @@ mod tests {
     fn multiline_tracking() {
         let mut lexer = Lexer::new();
 
-        // Create pattern for newlines and other tokens
-        let newline_pattern = Pattern::Regex(r"\n".to_string(), HashSet::new());
-        let word_pattern = Pattern::Regex("[a-zA-Z_]\\w*".to_string(), HashSet::new());
-        let space_pattern = Pattern::Regex("[ \t]+".to_string(), HashSet::new());
+        let terminal_defs = vec![WORD, NEWLINE, SPACE];
 
-        let terminal_defs = vec![
-            TerminalDef {
-                name: "WORD".to_string(),
-                pattern: word_pattern,
-                priority: 2,
-            },
-            TerminalDef {
-                name: "NEWLINE".to_string(),
-                pattern: newline_pattern,
-                priority: 1,
-            },
-            TerminalDef {
-                name: "SPACE".to_string(),
-                pattern: space_pattern,
-                priority: 0,
-            },
-        ];
-
-        let ignore_types = HashSet::from(["SPACE".to_string()]);
+        let ignore_types = HashSet::from([SPACE]);
 
         // Initialize the lexer
         lexer.initialize(terminal_defs, ignore_types).unwrap();
@@ -955,7 +833,7 @@ mod tests {
         // Test multiline text
         let text = "first\nsecond\nthird";
 
-        let tokens = lexer.lex_text(text).unwrap();
+        let tokens = lexer.lex(text).unwrap();
 
         // Check line numbers
         assert_eq!(tokens.0.len(), 5); // 3 words + 2 newlines

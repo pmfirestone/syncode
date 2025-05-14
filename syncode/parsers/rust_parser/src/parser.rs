@@ -1,194 +1,131 @@
+// src/parser.rs
+//! The parser for SynCode. Takes in a lexed sequence of tokens and determines
+//! the accept sequences that could follow.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 
-use crate::lexer::{LexResult, Token};
+use crate::lexer::{Lexer, NonTerminal, Terminal, Token};
 
-// Rule represents a grammar production rule
+// Rust RFC 1733 introduces this syntax as a way to alias bounds, which would
+// make this module much more readable. Unfortunately, as of 2025-05-09, the
+// behavior is not yet stable. See
+// https://github.com/rust-lang/rfcs/blob/master/text/1733-trait-alias.md.
+
+// trait ParserStateIndex = Clone + Eq + Hash + std::fmt::Debug;
+
+/// Rule represents a grammar production rule.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Rule {
+pub struct Rule<'a> {
     pub id: usize,
-    pub origin: String,
-    pub expansion: Vec<String>,
+    pub origin: &'a str,
+    pub expansion: Vec<&'a str>,
 }
 
-impl Rule {
-    pub fn new(id: usize, origin: String, expansion: Vec<String>) -> Self {
-        Rule {
-            id,
-            origin,
-            expansion,
-        }
-    }
-}
-
-impl fmt::Display for Rule {
+impl fmt::Display for Rule<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} -> {}", self.origin, self.expansion.join(" "))
     }
 }
 
-// Action enum for LR parsing
+/// Action enum for LR parsing.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Action<S: std::fmt::Debug> {
+pub enum Action<'a, S: std::fmt::Debug> {
     Shift(S),
-    Reduce(Rule),
+    Reduce(Rule<'a>),
+    Accept,
     Error,
 }
 
-// ParseTable represents an LR(1) parsing table
-#[derive(Clone, Debug)]
-pub struct ParseTable<S: Clone + Eq + Hash + std::fmt::Debug> {
-    pub states: HashMap<S, HashMap<String, Action<S>>>,
-    pub start_states: HashMap<String, S>,
-    pub end_states: HashMap<String, S>,
-}
+type ActionTable<'a> = HashMap<usize, HashMap<Terminal<'a>, Action<'a, usize>>>;
+type GotoTable<'a> = HashMap<usize, HashMap<NonTerminal<'a>, usize>>;
 
-impl<S: Clone + Eq + Hash + std::fmt::Debug> ParseTable<S> {
-    pub fn new() -> Self {
-        ParseTable {
-            states: HashMap::new(),
-            start_states: HashMap::new(),
-            end_states: HashMap::new(),
-        }
-    }
-}
-
-// Main data structure to represent the parser result
-#[derive(Clone, Debug)]
-pub struct ParseResult {
-    pub success: bool,
-    pub consumed: usize,
-}
-
-// TreeNode for the abstract syntax tree
-#[derive(Clone, Debug)]
-pub enum TreeNode {
-    Leaf(Token),
-    Node {
-        rule: usize,
-        rule_name: String,
-        children: Vec<TreeNode>,
-        meta: Option<HashMap<String, String>>,
-    },
-}
-
-// ParseConf holds configuration for the parser
+/// The Parser with its states, stack, and table.
 #[derive(Clone)]
-pub struct ParseConf<S: Clone + Eq + Hash + std::fmt::Debug> {
-    pub parse_table: ParseTable<S>,
-    pub start: String,
-    pub start_state: S,
-    pub end_state: S,
-}
-
-impl<S: Clone + Eq + Hash + std::fmt::Debug> ParseConf<S> {
-    pub fn new(parse_table: ParseTable<S>, start: String) -> Result<Self, ParserError> {
-        let start_state = match parse_table.start_states.get(&start) {
-            Some(state) => state.clone(),
-            None => {
-                return Err(ParserError::ConfigError(format!(
-                    "Start symbol '{}' not found in parse table",
-                    start
-                )));
-            }
-        };
-
-        let end_state = match parse_table.end_states.get(&start) {
-            Some(state) => state.clone(),
-            None => {
-                return Err(ParserError::ConfigError(format!(
-                    "End state for start symbol '{}' not found",
-                    start
-                )));
-            }
-        };
-
-        Ok(ParseConf {
-            parse_table,
-            start,
-            start_state,
-            end_state,
-        })
-    }
-}
-
-// ParserState holds the current state of the parser
-#[derive(Clone)]
-pub struct ParserState<S: Clone + Eq + Hash + std::fmt::Debug> {
-    pub parse_conf: ParseConf<S>,
-    pub state_stack: Vec<S>,
+pub struct Parser<'a> {
+    /// The lexer this parser uses.
+    lexer: Lexer<'a>,
+    /// The action table. Each entry has an index and maps between a terminal and an action.
+    pub action_table: ActionTable<'a>,
+    /// The goto table. Each entry maps between a state index and a map between
+    /// a non-terminal and another state index.
+    pub goto_table: GotoTable<'a>,
+    pub start: &'a str,
+    pub start_state: usize,
+    pub end_state: usize,
+    /// The number of lexical tokens we have parsed so far.
     pub token_index: usize,
+    /// The position in the input we have parsed to so far.
     pub last_pos: usize,
 }
 
-impl<S: Clone + Eq + Hash + std::fmt::Debug> ParserState<S> {
-    pub fn new(parse_conf: ParseConf<S>) -> Self {
-        ParserState {
-            state_stack: vec![parse_conf.start_state.clone()],
-            token_index: 0,
-            last_pos: 0,
-            parse_conf,
-        }
+impl<'a> Parser<'a> {
+    /// Return the terminals that the parser will accept in the current state.
+    pub fn follow(&'a self, state_stack: &Vec<usize>) -> Vec<Terminal<'a>> {
+        // Get the names of the terminals that can follow in the current state.
+        let terminal_names = self
+            .action_table
+            .get(state_stack.last().unwrap())
+            .unwrap();
+
+        // Look up the Terminal structs that represent the currently-acceptable terminals.
+        self.lexer
+            .terminals
+            .iter()
+            .filter(|terminal| terminal_names.contains_key(terminal))
+            .cloned()
+            .collect::<Vec<Terminal>>()
     }
 
-    pub fn position(&self) -> &S {
-        &self.state_stack[self.state_stack.len() - 1]
-    }
-
-    // Feed a token to the parser and process it according to the LR(1) algorithm
-    pub fn feed_token(&mut self, token: &Token) -> Result<(), ParserError> {
-        let state_stack = &mut self.state_stack;
-        let end_state = &self.parse_conf.end_state;
-        let states = &self.parse_conf.parse_table.states;
-
-        // Update last_pos to the end position of this token
-        self.last_pos = token.end_pos;
-
+    /// Feed a token to the parser and process it according to the LR(1) algorithm.
+    ///
+    /// The inner loop of the LR parsing algorithm.
+    pub fn next(&'a self, token: Token<'a>, state_stack: Vec<usize>) -> Result<Vec<usize>, ParserError<'a>> {
+        // This implementation is verbose because of the error handling
+        // involved. Perhaps there's a way to make it more streamlined by
+        // consolidating the error-managing boiler plate.
+	let mut state_stack = state_stack;
+	
         loop {
-            let state = state_stack.last().unwrap().clone();
+            // Get the current state.
+            let Some(state) = state_stack.last() else {
+                return Err(ParserError::StackUnderflow);
+            };
 
-            // Look up the current state and token type in the parse table
-            let action = match states
-                .get(&state)
-                .and_then(|transitions| transitions.get(&token.type_name))
-            {
-                Some(action) => action.clone(),
-                None => {
-                    // Collect the expected token types for error reporting
-                    let expected = states.get(&state)
-                        .map(|transitions| {
-                            transitions.keys()
-                                .filter(|key| key.chars().next().map_or(false, |c| c.is_uppercase()))
-                                .cloned()
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    
-                    return Err(ParserError::UnexpectedToken {
-                        token: token.clone(),
-                        expected,
-                        state_index: self.token_index,
-                    });
-                }
+            // Get the actions in the current state.
+            let Some(actions) = self.action_table.get(&state) else {
+                return Err(ParserError::InvalidState(*state));
+            };
+
+            // Look up the current state and token type in the parse table.
+            // FIXME: This will panic if it gets a token that is the unlexed remainder.
+            let Some(action) = actions.get(&token.terminal.clone().unwrap()) else {
+                return Err(ParserError::UnexpectedToken {
+                    token: token.clone(),
+                    expected: self.follow(&state_stack),
+                    state_index: self.token_index,
+                });
             };
 
             // eprintln!("Current state: {:?}, Token: {:?}", state, token);
             // eprintln!("Action: {:?}", action);
             // eprintln!("Transitions: {:?}", states.get(&state));
 
+            // Dispatch on action types.
             match action {
                 Action::Shift(next_state) => {
-                    // Just push next state on shift
-                    state_stack.push(next_state);
-                    return Ok(()); // Not yet accepted
+                    // Just push next state on shift.
+                    state_stack.push(*next_state);
+                    return Ok(state_stack); // Not yet accepted.
                 }
+
                 Action::Reduce(rule) => {
-                    // On a reduce, pop states according to the rule expansion length
+                    // On a reduce, pop states according to the rule expansion length.
                     let size = rule.expansion.len();
 
                     if size > 0 {
-                        // Pop the appropriate number of states
+                        // Pop the appropriate number of states.
                         for _ in 0..size {
                             if state_stack.pop().is_none() {
                                 return Err(ParserError::StackUnderflow);
@@ -196,141 +133,103 @@ impl<S: Clone + Eq + Hash + std::fmt::Debug> ParserState<S> {
                         }
                     }
 
-                    // Look up the next state based on current state and rule origin
-                    let current_state = state_stack.last().unwrap();
-                    let transitions = states.get(current_state).ok_or_else(|| {
-                        ParserError::InvalidState(format!(
-                            "State not found in parse table: {:?}",
-                            current_state
-                        ))
-                    })?;
+                    // Look up the next state in the goto table.
+                    let Some(current_state) = state_stack.last() else {
+                        return Err(ParserError::StackUnderflow);
+                    };
 
-                    let next_action = transitions.get(&rule.origin).ok_or_else(|| {
-                        ParserError::InvalidState(format!(
-                            "No transition for {} in state {:?}",
-                            rule.origin, current_state
-                        ))
-                    })?;
+                    // Get the gotos for this state.
+                    let Some(gotos) = self.goto_table.get(&current_state) else {
+                        return Err(ParserError::InvalidState(*current_state));
+                    };
 
-                    if let Action::Shift(next_state) = next_action {
-                        state_stack.push(next_state.clone());
-                    } else {
-                        return Err(ParserError::InvalidAction(format!(
-                            "Expected Shift after reduce, got {:?}",
-                            next_action
-                        )));
-                    }
+                    // Look up the next state in the goto table based on the rule.
+                    let Some(next_state) = gotos.get(rule.origin) else {
+                        return Err(ParserError::InvalidState(*current_state));
+                    };
+
+                    // Make this the new current state.
+                    state_stack.push(*next_state);
                 }
-                Action::Error => {
+
+                Action::Accept => {
+                    // We're probably never going to reach this case, and there
+                    // isn't really anything for us to do if we do.
+                    return Ok(state_stack);
+                }
+
+                _ => {
+                    // Anything else is an Error action.
                     return Err(ParserError::SyntaxError(format!(
-                        "Parser error at token: {} ({})",
-                        token.value, token.type_name
+                        "Parser error at token: {}",
+                        token,
                     )));
                 }
             }
         }
     }
-}
 
-// LR(1) Parser implementation
-#[derive(Clone)]
-pub struct Parser<S: Clone + Eq + Hash + std::fmt::Debug> {
-    pub conf: ParseConf<S>,
-}
+    /// Parse tokens without building a tree, just producing the accept
+    /// sequences and remainder. This is Algorithm 4 from the paper.
+    ///
+    /// Take in the partial output the model has generated so far and return
+    /// the accept sequences and the unparsed or lexed remainder.
+    // Don't implement the cache and restore behavior yet; just reparse
+    // from scratch each time. We'll see whether it's a problem in
+    // benchmarking and come back for it if we need to.
+    pub fn parse(
+        &'a mut self,
+        partial_output: &'a str,
+    ) -> Result<(Vec<Vec<Terminal<'a>>>, Token<'a>), ParserError<'a>> {
+        let mut a0: Vec<Terminal> = Vec::new();
+        let mut a1: Vec<Terminal> = Vec::new();
 
-impl<S: Clone + Eq + Hash + std::fmt::Debug> Parser<S> {
-    pub fn new(conf: ParseConf<S>) -> Self {
-        Parser { conf }
-    }
+        let Ok((tokens, remainder)) = self.lexer.lex(&*partial_output) else {
+            return Err(ParserError::EmptyStack);
+        }; // FIXME: return an actually useful error.
 
-    // Parse tokens without building a tree, just validating
-    pub fn parse(&self, tokens: &[LexResult]) -> Result<ParseResult, ParserError> {
-        let start_time = std::time::Instant::now();
-        let mut state = ParserState::new(self.conf.clone());
-        let token_count = tokens.len();
-
-        // Process all tokens
-        for (i, lex_result) in tokens.iter().enumerate() {
-            state.token_index = i;
-
-            match lex_result {
-                LexResult::Token(token) => {
-                    let is_last = i == token_count - 1;
-
-                    match state.feed_token(token) {
-                        // If last token then we should return the last token else we continue
-                        Ok(()) => {
-                            if is_last {
-                                eprintln!("Parsing completed in {:?}", start_time.elapsed());
-                                return Ok(ParseResult {
-                                    success: true,
-                                    consumed: state.last_pos,
-                                });
-                            } else {
-                                continue;
-                            }
-                        }
-
-                        // if there is an error during last token then we return the last token and success true
-                        // else we return the error
-                        Err(e) => {
-                            if is_last {
-                                return Ok(ParseResult {
-                                    success: true,
-                                    consumed: state.last_pos,
-                                });
-                            } else {
-                                return Err(e);
-                            }
-                        }
-                    }
-                }
-                LexResult::Error {
-                    error_type,
-                    pos,
-                    line,
-                    column,
-                    allowed: _,
-                    char,
-                } => {
-                    return Err(ParserError::LexerError {
-                        error_type: error_type.clone(),
-                        pos: *pos,
-                        line: *line,
-                        column: *column,
-                        char: *char,
-                    });
-                }
-                LexResult::Eof { pos, line, column } => {
-                    // Process EOF token specially
-                    let eof_token = Token {
-                        value: "".to_string(),
-                        type_name: "$END".to_string(),
-                        start_pos: *pos,
-                        end_pos: *pos,
-                        line: *line,
-                        column: *column,
-                        end_line: *line,
-                        end_column: *column,
-                    };
-                }
-            }
+        let last_token = tokens[tokens.len() - 1].clone();
+	let mut state_stack = vec![self.start_state];
+	
+        for token in &tokens[..] {
+	    let Ok(new_state_stack) = self.next(token.clone(), state_stack) else {
+                break;
+	    };
+	    state_stack = new_state_stack;
+            a0 = a1;
+            a1 = self.follow(&state_stack);
         }
 
-        // If we get here, we've consumed all tokens but not accepted
-        Ok(ParseResult {
-            success: false,
-            consumed: state.last_pos,
-        })
+        // There are two cases for accept sequences. See section 4.5 of the
+        // paper and Algorithm 4, lines 15-21.
+        let mut accept_sequences: Vec<Vec<Terminal>> = Vec::new();
+        if last_token == remainder {
+            // Case 1: the remainder is the last lexical token.
+            let Some(remainder_type) = remainder.clone().terminal else {
+                return Err(ParserError::StackUnderflow);
+            };
+            for terminal in a1 {
+                accept_sequences.push(vec![remainder_type.clone(), terminal]);
+            }
+            for terminal in a0 {
+                accept_sequences.push(vec![terminal]);
+            }
+        } else {
+            // Case 2: the remainder is some unparsed nonsense.
+            for terminal in a1 {
+                accept_sequences.push(vec![terminal]);
+            }
+        }
+        return Ok((accept_sequences, remainder));
     }
 }
 
 // Error types for the parser
 #[derive(Debug, Clone)]
-pub enum ParserError {
+pub enum ParserError<'a> {
     UnexpectedToken {
-        token: Token,
-        expected: Vec<String>,
+        token: Token<'a>,
+        expected: Vec<Terminal<'a>>,
         state_index: usize,
     },
     UnexpectedEof,
@@ -343,13 +242,167 @@ pub enum ParserError {
     },
     StackUnderflow,
     EmptyStack,
-    InvalidState(String),
+    InvalidState(usize),
     InvalidAction(String),
     SyntaxError(String),
     ConfigError(String),
 }
 
-impl fmt::Display for ParserError {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WORD: Terminal = Terminal {
+        name: "WORD",
+        pattern: "\\w+",
+        priority: 2,
+    };
+
+    const DEC_NUMBER: Terminal = Terminal {
+        name: "DEC_NUMBER",
+        pattern: r"0|[1-9]\d*",
+        priority: 1,
+    };
+
+    const EOF: Terminal = Terminal {
+        name: "EOF",
+        pattern: "",
+        priority: 0,
+    };
+
+    const STAR: Terminal = Terminal {
+        name: "STAR",
+        pattern: r"\*",
+        priority: 1,
+    };
+
+    const PLUS: Terminal = Terminal {
+        name: "PLUS",
+        pattern: r"\+",
+        priority: 1,
+    };
+
+    #[test]
+    fn calc_grammar() {
+        // Mega-simple grammar courtesy of https://en.wikipedia.org/wiki/LR_parser.
+        let rules: Vec<Rule> = vec![
+            Rule {
+                id: 0,
+                origin: "goal",
+                expansion: vec!["sums", "EOF"],
+            },
+            Rule {
+                id: 1,
+                origin: "sums",
+                expansion: vec!["sums", "PLUS", "products"],
+            },
+            Rule {
+                id: 2,
+                origin: "sums",
+                expansion: vec!["products"],
+            },
+            Rule {
+                id: 3,
+                origin: "products",
+                expansion: vec!["products", "STAR", "value"],
+            },
+            Rule {
+                id: 4,
+                origin: "products",
+                expansion: vec!["value"],
+            },
+            Rule {
+                id: 5,
+                origin: "value",
+                expansion: vec!["DEC_NUMBER"],
+            },
+            Rule {
+                id: 6,
+                origin: "value",
+                expansion: vec!["WORD"],
+            },
+        ];
+
+        let action_table: ActionTable = HashMap::from([
+            (
+                0,
+                HashMap::from([(DEC_NUMBER, Action::Shift(8)), (WORD, Action::Shift(9))]),
+            ),
+            (
+                1,
+                HashMap::from([(PLUS, Action::Shift(2)), (EOF, Action::Accept)]),
+            ),
+            (
+                2,
+                HashMap::from([(DEC_NUMBER, Action::Shift(8)), (WORD, Action::Shift(9))]),
+            ),
+            (
+                3,
+                HashMap::from([
+                    (STAR, Action::Shift(5)),
+                    (PLUS, Action::Reduce(rules[1].clone())),
+                ]),
+            ),
+            (
+                4,
+                HashMap::from([
+                    (STAR, Action::Shift(5)),
+                    (PLUS, Action::Reduce(rules[2].clone())),
+                    (EOF, Action::Reduce(rules[2].clone())),
+                ]),
+            ),
+            (
+                5,
+                HashMap::from([(DEC_NUMBER, Action::Shift(8)), (WORD, Action::Shift(9))]),
+            ),
+            (
+                6,
+                HashMap::from([
+                    (STAR, Action::Reduce(rules[3].clone())),
+                    (PLUS, Action::Reduce(rules[3].clone())),
+                    (EOF, Action::Reduce(rules[3].clone())),
+                ]),
+            ),
+            (
+                7,
+                HashMap::from([
+                    (STAR, Action::Reduce(rules[4].clone())),
+                    (PLUS, Action::Reduce(rules[4].clone())),
+                    (EOF, Action::Reduce(rules[4].clone())),
+                ]),
+            ),
+            (
+                8,
+                HashMap::from([
+                    (STAR, Action::Reduce(rules[5].clone())),
+                    (PLUS, Action::Reduce(rules[5].clone())),
+                    (EOF, Action::Reduce(rules[5].clone())),
+                ]),
+            ),
+            (
+                9,
+                HashMap::from([
+                    (STAR, Action::Reduce(rules[6].clone())),
+                    (PLUS, Action::Reduce(rules[6].clone())),
+                    (EOF, Action::Reduce(rules[6].clone())),
+                ]),
+            ),
+        ]);
+
+        let goto_table: GotoTable = HashMap::from([
+            (
+                0,
+                HashMap::from([("sums", 1), ("products", 4), ("value", 7)]),
+            ),
+            (2, HashMap::from([("products", 3), ("value", 7)])),
+            (5, HashMap::from([("value", 6)])),
+        ]);
+
+        let terminals: Vec<Terminal> = vec![WORD, STAR, DEC_NUMBER, PLUS, DEC_NUMBER];
+    }
+}
+
+impl fmt::Display for ParserError<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParserError::UnexpectedToken {
@@ -360,7 +413,11 @@ impl fmt::Display for ParserError {
                 write!(
                     f,
                     "Unexpected token '{}' (type: {}) at line {}, column {}. Expected one of: {:?}",
-                    token.value, token.type_name, token.line, token.column, expected
+                    token.value,
+                    token.terminal.clone().unwrap().name,
+                    token.line,
+                    token.column,
+                    expected
                 )
             }
             ParserError::UnexpectedEof => {

@@ -1,7 +1,10 @@
+// src/dfa.rs
+//! The DFA logic for SynCode. Used by `mask` to generate the mask store.
+
 use regex_automata::{
-    dfa::{dense, Automaton},
-    util::{primitives::StateID, start},
     Anchored,
+    dfa::{Automaton, dense},
+    util::{primitives::StateID, start},
 };
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};

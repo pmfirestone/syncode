@@ -1,18 +1,23 @@
 // src/util.rs
-use crate::parser::{Action, ParseTable, Rule};
+//! Utilities for SynCode.
+use crate::lexer::{Lexer, Terminal};
+use crate::parser::{Action, Parser, Rule};
 use std::collections::HashMap;
 
-pub fn load_parse_table(
+/// Helper function to build a `Parser` out of serialized forms from Lark.
+pub fn load_parser<'a>(
     rules: &HashMap<usize, Rule>,
     states_dict: HashMap<String, HashMap<String, (String, String)>>,
     start: &str,
     start_state: usize,
     end_state: usize,
-) -> ParseTable<usize> {
-    let mut table = ParseTable::<usize>::new();
+) -> Parser<'a> {
+    let mut states: HashMap<usize, HashMap<<'a>, Action<usize>>> = HashMap::new();
+    let mut start_states: HashMap<String, usize> = HashMap::new();
+    let mut end_states: HashMap<String, usize> = HashMap::new();
 
-    table.start_states.insert(start.to_string(), start_state);
-    table.end_states.insert(start.to_string(), end_state);
+    start_states.insert(start.to_string(), start_state);
+    end_states.insert(start.to_string(), end_state);
 
     // Convert serialized states to a ParseTable
     for (state_str, transitions) in states_dict {
@@ -30,7 +35,11 @@ pub fn load_parse_table(
                         Action::Reduce(rule.clone())
                     } else {
                         // Default to an empty rule if not found
-                        Action::Reduce(Rule::new(rule_id, "unknown".to_string(), vec![]))
+                        Action::Reduce(Rule {
+                            id: rule_id,
+                            origin: "unknown",
+                            expansion: vec![],
+                        })
                     }
                 }
                 // "accept" => Action::Accept,
@@ -40,8 +49,19 @@ pub fn load_parse_table(
             state_transitions.insert(symbol.clone(), action);
         }
 
-        table.states.insert(state, state_transitions);
+        states.insert(state, state_transitions);
     }
 
-    table
+    Parser {
+        lexer: Lexer::new(),
+        states,
+        start_states,
+        end_states,
+        start: start.to_string(),
+        start_state,
+        end_state,
+        state_stack: vec![],
+        token_index: 0,
+        last_pos: 0,
+    }
 }
