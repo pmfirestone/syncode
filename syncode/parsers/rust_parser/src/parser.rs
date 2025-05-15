@@ -192,16 +192,17 @@ impl<'a> Parser<'a> {
         }; // FIXME: return an actually useful error.
 
         let last_token = tokens[tokens.len() - 1].clone();
-        let state_stack = vec![self.start_state];
+        let mut state_stack = vec![self.start_state];
 
         for token in &tokens[..] {
             let Some(terminal) = token.terminal.clone() else {
                 return Err(ParserError::InvalidToken);
             };
             // FIXME: There must be a less horrid way to do this.
-            let Ok(state_stack) = self.next(terminal, state_stack.clone()) else {
+            let Ok(new_state_stack) = self.next(terminal, state_stack) else {
                 break;
             };
+	    state_stack = new_state_stack;
             a0 = a1;
             a1 = self.follow(&state_stack);
         }
