@@ -1,10 +1,10 @@
 [package]
-name = "rust_parser"
+name = "syncode-core"
 version = "0.1.1"
 edition = "2024"
 
 [lib]
-name = "rust_parser"
+name = "syncode_core"
 # For normal Python extension builds
 crate-type = ["cdylib"]
 

@@ -11,7 +11,7 @@ use std::{collections::HashMap, vec::Vec};
 
 /// A struct to encapsulate a cache for building DFAs. This has too many layers
 /// of indirection; for now it's just proof of concept.
-struct Masker {
+pub struct Masker {
     dfa_builder: DFABuilder,
 }
 
@@ -23,7 +23,7 @@ impl Masker {
     /// 2. ∃w1 ∈ Σ∗, w2 ∈ Σ+ such that w1.w2 = w, δ∗(w1, q) ∈ F and Λ = {} or
     /// 3. ∃w1 ∈ Σ∗, w2 ∈ Σ∗ such that w1.w2 = w, δ∗(w1, q) ∈ F, and dmatch(w2, qτf +10 , {τf +2 . . . τf +d}) = true where qτf +10 is the start state corresponding to the DFA for τf +1.
     ///
-    fn dmatch(
+    pub fn dmatch(
         &mut self,
         string: &str,
         starting_state: &mut DFAState,
@@ -102,7 +102,7 @@ impl Masker {
     /// Mα(q, Λ) = m is a binary mask such that t ∈ set(m) if dmatch(t, q, Λ),
     /// where t is a string (token in the LLM's vocabulary), q is a DFA state, and
     /// Λ is an accept sequence.
-    fn dfa_mask(
+    pub fn dfa_mask(
         &mut self,
         state: &mut DFAState,
         terminal_sequence: &Vec<&str>,
@@ -129,7 +129,7 @@ impl Masker {
     /// the set of terminals Γ and the model’s vocabulary V. As a result, a unique
     /// mask store is created for each grammar and tokenizer combination, and to
     /// enhance efficiency, we cache and reuse this table for future inferences.
-    fn dfa_mask_store<'a>(
+    pub fn dfa_mask_store<'a>(
         &mut self,
         lexical_terminals: Vec<&'a str>,
         model_vocabulary: Vec<&'a str>,
@@ -162,7 +162,7 @@ impl Masker {
         store
     }
 
-    fn new() -> Masker {
+    pub fn new() -> Masker {
         Masker {
             dfa_builder: DFABuilder::new(),
         }

@@ -91,11 +91,11 @@ struct Scanner<'a> {
     /// Maps DFA match pattern to the TerminalDef it represents.
     index_to_type: HashMap<usize, Terminal<'a>>,
     /// Maps token type name to whether it can contain newlines.
-    newline_types: HashSet<&'a str>,
+    _newline_types: HashSet<&'a str>,
     /// Terminal definitions for reference.
-    terminals: Vec<Terminal<'a>>,
+    _terminals: Vec<Terminal<'a>>,
     /// All allowed types.
-    pub allowed_types: HashSet<&'a str>,
+    pub _allowed_types: HashSet<&'a str>,
 }
 
 impl<'a> Scanner<'a> {
@@ -106,17 +106,17 @@ impl<'a> Scanner<'a> {
 
         // Determine which patterns might contain newlines
         for terminal in &terminals {
-            let pattern_str = terminal.pattern.clone();
+            let pattern_str = terminal.pattern;
             if pattern_str.contains("\\n")
                 || pattern_str.contains("\n")
                 || pattern_str.contains("\\s")
                 || pattern_str.contains("[^")
                 || (pattern_str.contains(".") && pattern_str.contains("(?s"))
             {
-                newline_types.insert(terminal.name.clone());
+                newline_types.insert(terminal.name);
             }
 
-            allowed_types.insert(terminal.name.clone());
+            allowed_types.insert(terminal.name);
         }
 
         // Sort terminals by priority (highest first)
@@ -153,9 +153,9 @@ impl<'a> Scanner<'a> {
         Ok(Scanner {
             dfa,
             index_to_type,
-            newline_types,
-            terminals: sorted_terminals,
-            allowed_types,
+            _newline_types: newline_types,
+            _terminals: sorted_terminals,
+            _allowed_types: allowed_types,
         })
     }
 
@@ -224,7 +224,7 @@ impl<'a> Scanner<'a> {
 #[derive(Clone)]
 pub struct Lexer<'a> {
     /// The machinery for the DFAs.
-    scanner: Option<Scanner<'a>>,
+    scanner: Scanner<'a>,
     /// The terminals this lexer recognizes.
     pub terminals: Vec<Terminal<'a>>,
     /// The terminals that this lexer ignores.
@@ -234,23 +234,18 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new() -> Self {
-        Lexer {
-            scanner: None,
-            terminals: Vec::new(),
-            ignore_types: HashSet::new(),
-            newline_types: HashSet::new(),
-        }
-    }
-
-    pub fn initialize(
-        &mut self,
+    /// Construct a new lexer that recognizes the given `terminals` and ignores
+    /// the `ignore_types`.
+    ///
+    /// Note that all members of `ignore_types` must also be in `terminals`:
+    /// otherwise they won't be recognized at all. This is perhaps suboptimal
+    /// API design.
+    pub fn new(
         terminals: Vec<Terminal<'a>>,
         ignore_types: HashSet<Terminal<'a>>,
-    ) -> Result<(), LexError> {
-        self.ignore_types = ignore_types;
-
+    ) -> Result<Self, LexError> {
         // Determine which patterns might contain newlines
+        let mut newline_types: HashSet<Terminal<'a>> = HashSet::new();
         for terminal in &terminals {
             if terminal.pattern.contains("\\n")
                 || terminal.pattern.contains("\n")
@@ -258,17 +253,18 @@ impl<'a> Lexer<'a> {
                 || terminal.pattern.contains("[^")
                 || (terminal.pattern.contains(".") && terminal.pattern.contains("(?s"))
             {
-                self.newline_types.insert(terminal.clone());
+                newline_types.insert(terminal.clone());
             }
         }
 
         // Create scanner
         match Scanner::new(terminals.clone()) {
-            Ok(scanner) => {
-                self.scanner = Some(scanner);
-                self.terminals = terminals;
-                Ok(())
-            }
+            Ok(scanner) => Ok(Lexer {
+                scanner,
+                terminals,
+                ignore_types,
+                newline_types,
+            }),
             Err(e) => Err(e),
         }
     }
@@ -289,21 +285,10 @@ impl<'a> Lexer<'a> {
         mut pos: usize,
         mut line: usize,
         mut column: usize,
-        //        last_token: Option<&Token>,
     ) -> Result<(Token<'a>, bool), LexError> {
-        // Ensure scanner is initialized
-        let scanner = match &self.scanner {
-            Some(s) => s,
-            None => {
-                return Err(LexError::InitError(
-                    "Scanner not initialized. Call initialize() first.".to_string(),
-                ));
-            }
-        };
-
         loop {
             // Try to match next token
-            if let Some((value, terminal)) = scanner.match_token(text, pos) {
+            if let Some((value, terminal)) = self.scanner.match_token(text, pos) {
                 let ignored = self.ignore_types.contains(terminal);
 
                 // If this token is ignored, update position and continue the loop
@@ -406,12 +391,6 @@ impl<'a> Lexer<'a> {
     /// unlexable suffix, in the case where the end of the input could not be
     /// lexed.
     pub fn lex(&'a self, text: &'a str) -> Result<(Vec<Token<'a>>, Token<'a>), LexError> {
-        if self.scanner.is_none() {
-            return Err(LexError::InitError(
-                "Scanner not initialized. Call initialize() first.".to_string(),
-            ));
-        }
-
         // Pre-allocate a reasonably-sized vector based on estimated token density
         let estimated_token_count = text.len() / 8;
         let mut tokens = Vec::with_capacity(estimated_token_count);
@@ -541,33 +520,43 @@ mod tests {
         priority: 1,
     };
 
+    const STAR: Terminal = Terminal {
+        name: "STAR",
+        pattern: r"\*",
+        priority: 1,
+    };
+
+    const PLUS: Terminal = Terminal {
+        name: "PLUS",
+        pattern: r"\+",
+        priority: 1,
+    };
+
     #[test]
     fn lexer_initialization() {
-        let mut lexer = Lexer::new();
-
         let terminal_defs = vec![WORD, SPACE];
 
         let ignore_types = HashSet::from([SPACE]);
 
-        // Initialize the lexer
-        lexer.initialize(terminal_defs, ignore_types).unwrap();
+        let Ok(lexer) = Lexer::new(terminal_defs, ignore_types) else {
+            panic!()
+        };
 
         // Check if it was initialized correctly
-        assert!(lexer.scanner.is_some());
         assert_eq!(lexer.terminals.len(), 2);
         assert_eq!(lexer.ignore_types.len(), 1);
     }
 
     #[test]
     fn simple_lexing() {
-        let mut lexer = Lexer::new();
-
         let terminal_defs = vec![WORD, SPACE];
 
         let ignore_types = HashSet::from([SPACE]);
 
         // Initialize the lexer
-        lexer.initialize(terminal_defs, ignore_types).unwrap();
+        let Ok(lexer) = Lexer::new(terminal_defs, ignore_types) else {
+            panic!()
+        };
 
         // Lex a simple text
         let tokens = lexer.lex("hello world").unwrap();
@@ -587,15 +576,43 @@ mod tests {
     }
 
     #[test]
-    fn complex_string_literals() {
-        let mut lexer = Lexer::new();
+    fn expression() {
+        let Ok(lexer) = Lexer::new(
+            vec![WORD, STAR, DEC_NUMBER, PLUS, SPACE],
+            HashSet::from([SPACE]),
+        ) else {
+            panic!()
+        };
 
+        let input = "A * 2 + 1";
+
+        let Ok((_tokens, remainder)) = lexer.lex(input) else {
+            panic!()
+        };
+        assert_eq!(
+            Token {
+                value: "1",
+                terminal: Some(DEC_NUMBER),
+                start_pos: 8,
+                end_pos: 9,
+                line: 1,
+                end_line: 1,
+                column: 9,
+                end_column: 10
+            },
+            remainder
+        );
+    }
+
+    #[test]
+    fn complex_string_literals() {
         let terminal_defs = vec![STRING, WORD, EQUALS, DOT, SPACE];
 
         let ignore_types = HashSet::from([SPACE]);
 
-        // Initialize the lexer
-        lexer.initialize(terminal_defs, ignore_types).unwrap();
+        let Ok(lexer) = Lexer::new(terminal_defs, ignore_types) else {
+            panic!()
+        };
 
         // Test a simple triple-quoted string
         let text = r#"x = """This is a simple string"""."#;
@@ -704,12 +721,11 @@ mod tests {
             ),
         ];
 
+        let Ok(lexer) = Lexer::new(terminal_defs, ignore_types) else {
+            panic!()
+        };
+
         for (text, expected_tokens) in test_cases {
-            // Make a new lexer every time through this loop to make the compiler happy.
-            let mut lexer = Lexer::new();
-            lexer
-                .initialize(terminal_defs.clone(), ignore_types.clone())
-                .unwrap();
             let tokens = lexer.lex(text).unwrap();
 
             // Check token types and values (excluding EOF)
@@ -733,8 +749,9 @@ mod tests {
 
         let ignore_types = HashSet::from([SPACE]);
 
-        let mut lexer = Lexer::new();
-        lexer.initialize(terminals, ignore_types).unwrap();
+        let Ok(lexer) = Lexer::new(terminals, ignore_types) else {
+            panic!()
+        };
 
         let text = "123 ret";
         let (tokens, remainder) = lexer.lex(text).unwrap();
@@ -781,8 +798,9 @@ mod tests {
 
         let ignore_types = HashSet::from([SPACE]);
 
-        let mut lexer = Lexer::new();
-        lexer.initialize(terminals, ignore_types).unwrap();
+        let Ok(lexer) = Lexer::new(terminals, ignore_types) else {
+            panic!()
+        };
 
         let text = "return 0x";
         let (tokens, remainder) = lexer.lex(text).unwrap();
@@ -821,14 +839,13 @@ mod tests {
 
     #[test]
     fn multiline_tracking() {
-        let mut lexer = Lexer::new();
-
         let terminal_defs = vec![WORD, NEWLINE, SPACE];
 
         let ignore_types = HashSet::from([SPACE]);
 
-        // Initialize the lexer
-        lexer.initialize(terminal_defs, ignore_types).unwrap();
+        let Ok(lexer) = Lexer::new(terminal_defs, ignore_types) else {
+            panic!()
+        };
 
         // Test multiline text
         let text = "first\nsecond\nthird";

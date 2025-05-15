@@ -41,33 +41,34 @@ pub enum Action<'a, S: std::fmt::Debug> {
 type ActionTable<'a> = HashMap<usize, HashMap<Terminal<'a>, Action<'a, usize>>>;
 type GotoTable<'a> = HashMap<usize, HashMap<NonTerminal<'a>, usize>>;
 
-/// The Parser with its states, stack, and table.
+/// The Parser with its tables.
+///
+/// We do not include the state stack as part of the parser struct, since it is
+/// easier by far to handle this struct as an immutable value and keep the
+/// stack as an argument that is passed in and out for each call.
 #[derive(Clone)]
 pub struct Parser<'a> {
-    /// The lexer this parser uses.
-    lexer: Lexer<'a>,
+    /// This parser's lexer.
+    //It's not great to have this be part of the Parser, but the logic of
+    // [Parser::parse] requires that the Parser know about the remainder, which
+    // is most easily gotten using the [Lexer] directly.
+    pub lexer: Lexer<'a>,
     /// The action table. Each entry has an index and maps between a terminal and an action.
     pub action_table: ActionTable<'a>,
     /// The goto table. Each entry maps between a state index and a map between
     /// a non-terminal and another state index.
     pub goto_table: GotoTable<'a>,
-    pub start: &'a str,
+    /// The index of the state to start at.
     pub start_state: usize,
-    pub end_state: usize,
     /// The number of lexical tokens we have parsed so far.
     pub token_index: usize,
-    /// The position in the input we have parsed to so far.
-    pub last_pos: usize,
 }
 
 impl<'a> Parser<'a> {
     /// Return the terminals that the parser will accept in the current state.
     pub fn follow(&'a self, state_stack: &Vec<usize>) -> Vec<Terminal<'a>> {
         // Get the names of the terminals that can follow in the current state.
-        let terminal_names = self
-            .action_table
-            .get(state_stack.last().unwrap())
-            .unwrap();
+        let terminal_names = self.action_table.get(state_stack.last().unwrap()).unwrap();
 
         // Look up the Terminal structs that represent the currently-acceptable terminals.
         self.lexer
@@ -81,12 +82,16 @@ impl<'a> Parser<'a> {
     /// Feed a token to the parser and process it according to the LR(1) algorithm.
     ///
     /// The inner loop of the LR parsing algorithm.
-    pub fn next(&'a self, token: Token<'a>, state_stack: Vec<usize>) -> Result<Vec<usize>, ParserError<'a>> {
+    pub fn next(
+        &'a self,
+        terminal: Terminal<'a>,
+        state_stack: Vec<usize>,
+    ) -> Result<Vec<usize>, ParserError<'a>> {
         // This implementation is verbose because of the error handling
         // involved. Perhaps there's a way to make it more streamlined by
         // consolidating the error-managing boiler plate.
-	let mut state_stack = state_stack;
-	
+        let mut state_stack = state_stack;
+
         loop {
             // Get the current state.
             let Some(state) = state_stack.last() else {
@@ -99,13 +104,11 @@ impl<'a> Parser<'a> {
             };
 
             // Look up the current state and token type in the parse table.
-            // FIXME: This will panic if it gets a token that is the unlexed remainder.
-            let Some(action) = actions.get(&token.terminal.clone().unwrap()) else {
-                return Err(ParserError::UnexpectedToken {
-                    token: token.clone(),
-                    expected: self.follow(&state_stack),
-                    state_index: self.token_index,
-                });
+            let Some(action) = actions.get(&terminal.clone()) else {
+                return Err(ParserError::InvalidTerminal(
+                    terminal,
+                    self.follow(&state_stack),
+                ));
             };
 
             // eprintln!("Current state: {:?}, Token: {:?}", state, token);
@@ -162,7 +165,7 @@ impl<'a> Parser<'a> {
                     // Anything else is an Error action.
                     return Err(ParserError::SyntaxError(format!(
                         "Parser error at token: {}",
-                        token,
+                        terminal,
                     )));
                 }
             }
@@ -178,24 +181,27 @@ impl<'a> Parser<'a> {
     // from scratch each time. We'll see whether it's a problem in
     // benchmarking and come back for it if we need to.
     pub fn parse(
-        &'a mut self,
+        &'a self,
         partial_output: &'a str,
     ) -> Result<(Vec<Vec<Terminal<'a>>>, Token<'a>), ParserError<'a>> {
         let mut a0: Vec<Terminal> = Vec::new();
         let mut a1: Vec<Terminal> = Vec::new();
 
-        let Ok((tokens, remainder)) = self.lexer.lex(&*partial_output) else {
-            return Err(ParserError::EmptyStack);
+        let Ok((tokens, remainder)) = self.lexer.lex(partial_output) else {
+            return Err(ParserError::LexerError);
         }; // FIXME: return an actually useful error.
 
         let last_token = tokens[tokens.len() - 1].clone();
-	let mut state_stack = vec![self.start_state];
-	
+        let state_stack = vec![self.start_state];
+
         for token in &tokens[..] {
-	    let Ok(new_state_stack) = self.next(token.clone(), state_stack) else {
+            let Some(terminal) = token.terminal.clone() else {
+                return Err(ParserError::InvalidToken);
+            };
+            // FIXME: There must be a less horrid way to do this.
+            let Ok(state_stack) = self.next(terminal, state_stack.clone()) else {
                 break;
-	    };
-	    state_stack = new_state_stack;
+            };
             a0 = a1;
             a1 = self.follow(&state_stack);
         }
@@ -233,28 +239,32 @@ pub enum ParserError<'a> {
         state_index: usize,
     },
     UnexpectedEof,
-    LexerError {
-        error_type: String,
-        pos: usize,
-        line: usize,
-        column: usize,
-        char: char,
-    },
+    LexerError,
     StackUnderflow,
     EmptyStack,
     InvalidState(usize),
     InvalidAction(String),
+    /// We got a terminal that doesn't work in this state.
+    InvalidTerminal(
+        /// Actual.
+        Terminal<'a>,
+        /// Expected.
+        Vec<Terminal<'a>>,
+    ),
+    InvalidToken,
     SyntaxError(String),
     ConfigError(String),
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     const WORD: Terminal = Terminal {
         name: "WORD",
-        pattern: "\\w+",
+        pattern: r"[a-zA-Z_]\w*",
         priority: 2,
     };
 
@@ -282,10 +292,15 @@ mod tests {
         priority: 1,
     };
 
-    #[test]
-    fn calc_grammar() {
-        // Mega-simple grammar courtesy of https://en.wikipedia.org/wiki/LR_parser.
-        let rules: Vec<Rule> = vec![
+    const SPACE: Terminal = Terminal {
+        name: "SPACE",
+        pattern: r"\s+",
+        priority: 0,
+    };
+
+    // Mega-simple grammar courtesy of https://en.wikipedia.org/wiki/LR_parser.
+    fn calc_rules() -> Vec<Rule<'static>> {
+	vec![
             Rule {
                 id: 0,
                 origin: "goal",
@@ -321,9 +336,12 @@ mod tests {
                 origin: "value",
                 expansion: vec!["WORD"],
             },
-        ];
+        ]
+    }
 
-        let action_table: ActionTable = HashMap::from([
+    fn calc_action_table() -> ActionTable<'static> {
+	let rules = calc_rules();
+	HashMap::from([
             (
                 0,
                 HashMap::from([(DEC_NUMBER, Action::Shift(8)), (WORD, Action::Shift(9))]),
@@ -387,18 +405,96 @@ mod tests {
                     (EOF, Action::Reduce(rules[6].clone())),
                 ]),
             ),
-        ]);
-
-        let goto_table: GotoTable = HashMap::from([
+        ])
+    }
+    
+    fn calc_goto_table() -> GotoTable<'static> {
+        HashMap::from([
             (
                 0,
                 HashMap::from([("sums", 1), ("products", 4), ("value", 7)]),
             ),
             (2, HashMap::from([("products", 3), ("value", 7)])),
             (5, HashMap::from([("value", 6)])),
-        ]);
+        ])
+    }
 
-        let terminals: Vec<Terminal> = vec![WORD, STAR, DEC_NUMBER, PLUS, DEC_NUMBER];
+    fn calc_parser() -> Parser<'static> {
+        let action_table = calc_action_table();
+	let goto_table = calc_goto_table();
+
+        let Ok(lexer) = Lexer::new(
+            vec![WORD, STAR, DEC_NUMBER, PLUS, SPACE],
+            HashSet::from([SPACE]),
+        ) else {
+            panic!()
+        };
+
+        Parser {
+            lexer,
+            action_table,
+            goto_table,
+            start_state: 0,
+            token_index: 0,
+        }
+    }
+    
+    #[test]
+    fn calc_grammar_step_through_states() {
+        let parser = calc_parser();
+        let terminals_to_parse: Vec<Terminal> = vec![WORD, STAR, DEC_NUMBER, PLUS, DEC_NUMBER];
+        let state_stack: Vec<usize> = vec![parser.start_state];
+
+        let Ok(state_stack) = parser.next(terminals_to_parse[0].clone(), state_stack) else {
+            panic!()
+        };
+        assert_eq!(9, *state_stack.last().unwrap());
+
+        let Ok(state_stack) = parser.next(terminals_to_parse[1].clone(), state_stack) else {
+            panic!()
+        };
+        assert_eq!(5, *state_stack.last().unwrap());
+
+        let Ok(state_stack) = parser.next(terminals_to_parse[2].clone(), state_stack) else {
+            panic!()
+        };
+        assert_eq!(8, *state_stack.last().unwrap());
+
+        let Ok(state_stack) = parser.next(terminals_to_parse[3].clone(), state_stack) else {
+            panic!()
+        };
+        assert_eq!(2, *state_stack.last().unwrap());
+
+        let Ok(state_stack) = parser.next(terminals_to_parse[4].clone(), state_stack) else {
+            panic!()
+        };
+        assert_eq!(8, *state_stack.last().unwrap());
+    }
+
+    #[test]
+    fn end_to_end_parse() {
+	let parser = calc_parser();
+
+	let input = "A * 2 + 1";
+
+        let Ok((accept_sequences, remainder)) = parser.parse(input) else {
+            panic!()
+        };
+        assert_eq!(
+            Token {
+                value: "1",
+                terminal: Some(DEC_NUMBER),
+                start_pos: 8,
+                end_pos: 9,
+                line: 1,
+                end_line: 1,
+                column: 9,
+                end_column: 10
+            },
+            remainder
+        );
+
+        assert_eq!(Vec::<Vec::<Terminal>>::new(), accept_sequences);
     }
 }
 
@@ -423,18 +519,8 @@ impl fmt::Display for ParserError<'_> {
             ParserError::UnexpectedEof => {
                 write!(f, "Unexpected end of input")
             }
-            ParserError::LexerError {
-                error_type,
-                pos,
-                line,
-                column,
-                char,
-            } => {
-                write!(
-                    f,
-                    "Lexer error: {} at position {} (line {}, column {}): '{}'",
-                    error_type, pos, line, column, char
-                )
+            ParserError::LexerError => {
+                write!(f, "Lexer error",)
             }
             ParserError::StackUnderflow => {
                 write!(f, "Parser stack underflow")
@@ -453,6 +539,20 @@ impl fmt::Display for ParserError<'_> {
             }
             ParserError::ConfigError(msg) => {
                 write!(f, "Parser configuration error: {}", msg)
+            }
+            ParserError::InvalidTerminal(actual, _expected) => {
+                // FIXME: Implement fmt for Vec<Terminal.>
+                write!(
+                    f,
+                    "Unexpected terminal. Got: {}.",
+                    actual // , expected
+                )
+            }
+            ParserError::InvalidToken => {
+                write!(
+                    f,
+                    "Received a token without a terminal that wasn't the remainder."
+                )
             }
         }
     }
