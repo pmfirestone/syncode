@@ -178,6 +178,12 @@ fn closure(items: HashSet<Item>, grammar: &Grammar) -> HashSet<Item> {
         let old_item_set = item_set.clone();
         for item in item_set.clone() {
             for production in &grammar.productions[..] {
+		if item.dot == item.production.result.len() {
+		    // We only want productions that don't have the dot at the
+		    // end (and to avoid a panic when indexing at the next
+		    // check).
+		    continue;
+		}
                 if Symbol::NonTerminal(production.source) != item.production.result[item.dot] {
                     // We only want the productions that begin with the symbol after the dot.
                     continue;
@@ -210,6 +216,10 @@ fn goto(items: &HashSet<Item>, symbol: &Symbol, grammar: &Grammar) -> HashSet<It
     // Initialize to the empty set.
     let mut result: HashSet<Item> = HashSet::new();
     for item in items {
+	// We only want items where the dot is not at the end of the result yet.
+	if item.dot == item.production.result.len() {
+	    continue;
+	}
         // Add all items the return set, advancing the dot by one.
         if item.production.result[item.dot] == *symbol {
             result.insert(Item {
@@ -425,5 +435,7 @@ mod tests {
         let Ok((action_table, goto_table)) = tables(grammar) else {
             panic!()
         };
+	eprintln!("{:#?}", action_table);
+	eprintln!("{:#?}", goto_table);
     }
 }
