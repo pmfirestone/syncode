@@ -5,64 +5,8 @@
 use regex_automata::dfa::{Automaton, StartKind, dense};
 use regex_automata::{Anchored, util::start};
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
-/// A lexical token, what the lexer breaks the input into.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Token<'a> {
-    /// The content of the token.
-    pub value: &'a str,
-    /// The type of terminal that this is in the grammar. None if this token
-    /// couldn't be lexed, which can happen in the case that this is the
-    /// unlexable remainder.
-    pub terminal: Option<Terminal<'a>>,
-    /// Where in the input the token begins.
-    pub start_pos: usize,
-    /// Where in the input the token ends.
-    pub end_pos: usize,
-    /// The line of the input the token begins on.
-    pub line: usize,
-    /// The line of the input the token ends on.
-    pub end_line: usize,
-    /// The column of the input the token begins on.
-    pub column: usize,
-    /// The column of the input the token ends on.
-    pub end_column: usize,
-}
-
-impl fmt::Display for Token<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Token({:?}, {})", self.terminal, self.value)
-    }
-}
-
-/// A terminal of the grammar.
-///
-/// FIXME: As a future optimization, put as many of these as possible behind
-/// `Rc`s or `Arc`s, because they are immutable and are often copied or moved
-/// around.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub struct Terminal<'a> {
-    /// The name of this terminal in the grammar.
-    pub name: &'a str,
-    /// The regex describing this terminal.
-    pub pattern: &'a str,
-    /// This terminal's priority in lexing.
-    pub priority: i32,
-}
-
-/// A type alias for nonterminals of the grammar, purely for readability.
-pub type NonTerminal<'a> = &'a str;
-
-impl fmt::Display for Terminal<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Terminal({}, {}, {})",
-            self.name, self.pattern, self.priority
-        )
-    }
-}
+use crate::types::{Terminal, Token};
 
 /// A type to describe errors that can arise in lexing.
 #[derive(Debug, Clone)]
@@ -163,13 +107,12 @@ impl<'a> Scanner<'a> {
     /// return it along with the type of terminal that it is.
     ///
     /// Look for the longest possible match.
-    pub fn match_token(&self, text: &'a str, pos: usize) -> Option<(&'a str, &Terminal)> {
+    pub fn match_token(&self, text: &'a [u8], pos: usize) -> Option<(&'a [u8], &Terminal)> {
         if pos >= text.len() {
             return None;
         }
 
         let rest = &text[pos..];
-        let bytes = rest.as_bytes();
 
         let config = start::Config::new().anchored(Anchored::Yes);
         let mut state = self.dfa.start_state(&config).expect("no look-around");
@@ -183,7 +126,7 @@ impl<'a> Scanner<'a> {
         let mut current_len = 0;
 
         // Walk through the DFA state by state
-        for &byte in bytes {
+        for &byte in rest {
             state = self.dfa.next_state(state, byte);
 
             if self.dfa.is_dead_state(state) {
@@ -281,7 +224,7 @@ impl<'a> Lexer<'a> {
     // in the code similar to that in the paper.
     fn next_token(
         &'a self,
-        text: &'a str,
+        text: &'a [u8],
         mut pos: usize,
         mut line: usize,
         mut column: usize,

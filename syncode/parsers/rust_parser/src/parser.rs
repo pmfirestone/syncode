@@ -49,7 +49,7 @@ type GotoTable<'a> = HashMap<usize, HashMap<NonTerminal<'a>, usize>>;
 #[derive(Clone)]
 pub struct Parser<'a> {
     /// This parser's lexer.
-    //It's not great to have this be part of the Parser, but the logic of
+    // It's not great to have this be part of the Parser, but the logic of
     // [Parser::parse] requires that the Parser know about the remainder, which
     // is most easily gotten using the [Lexer] directly.
     pub lexer: Lexer<'a>,
@@ -202,7 +202,7 @@ impl<'a> Parser<'a> {
             let Ok(new_state_stack) = self.next(terminal, state_stack) else {
                 break;
             };
-	    state_stack = new_state_stack;
+            state_stack = new_state_stack;
             a0 = a1;
             a1 = self.follow(&state_stack);
         }
@@ -301,7 +301,7 @@ mod tests {
 
     // Mega-simple grammar courtesy of https://en.wikipedia.org/wiki/LR_parser.
     fn calc_rules() -> Vec<Rule<'static>> {
-	vec![
+        vec![
             Rule {
                 id: 0,
                 origin: "goal",
@@ -341,8 +341,8 @@ mod tests {
     }
 
     fn calc_action_table() -> ActionTable<'static> {
-	let rules = calc_rules();
-	HashMap::from([
+        let rules = calc_rules();
+        HashMap::from([
             (
                 0,
                 HashMap::from([(DEC_NUMBER, Action::Shift(8)), (WORD, Action::Shift(9))]),
@@ -408,7 +408,7 @@ mod tests {
             ),
         ])
     }
-    
+
     fn calc_goto_table() -> GotoTable<'static> {
         HashMap::from([
             (
@@ -422,7 +422,7 @@ mod tests {
 
     fn calc_parser() -> Parser<'static> {
         let action_table = calc_action_table();
-	let goto_table = calc_goto_table();
+        let goto_table = calc_goto_table();
 
         let Ok(lexer) = Lexer::new(
             vec![WORD, STAR, DEC_NUMBER, PLUS, SPACE],
@@ -439,7 +439,7 @@ mod tests {
             token_index: 0,
         }
     }
-    
+
     #[test]
     fn calc_grammar_step_through_states() {
         let parser = calc_parser();
@@ -474,9 +474,9 @@ mod tests {
 
     #[test]
     fn end_to_end_parse() {
-	let parser = calc_parser();
+        let parser = calc_parser();
 
-	let input = "A * 2 + 1";
+        let input = "A * 2 + 1";
 
         let Ok((accept_sequences, remainder)) = parser.parse(input) else {
             panic!()
@@ -494,7 +494,8 @@ mod tests {
             },
             remainder
         );
-
+        // It's not clear to me exactly what the semantics are here
+        // w.r.t. whitespace and other ignored terminals.
         assert_eq!(Vec::<Vec::<Terminal>>::new(), accept_sequences);
     }
 }

@@ -1,213 +1,210 @@
 // src/mask.rd
 //! The mask store for SynCode, implementing the basic algorithm from the paper.
 
+use crate::dfa::{DFA, DFABuilder, DFAState, all_dfa_states};
+use crate::types::{Terminal, Token};
 use core::iter::Iterator;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
-use regex_automata::{dfa::Automaton, util::primitives::StateID};
-//use std::iter::zip;
-use crate::dfa::{DFABuilder, DFAState, all_dfa_states};
+use regex_automata::{Anchored, dfa::Automaton, util::primitives::StateID, util::start::Config};
+use std::iter::zip;
 use std::{collections::HashMap, vec::Vec};
 
-/// A struct to encapsulate a cache for building DFAs. This has too many layers
-/// of indirection; for now it's just proof of concept.
-pub struct Masker {
-    dfa_builder: DFABuilder,
+/// Compute whether the string could match a sequence of terminals starting at a certain state in the first DFA.
+///
+/// Given a DFA D(Q, Σ, δ, q0, F ), a string w ∈ Σ∗, a DFA state q ∈ Q and any sequence of terminals Λ = {τf +1, τf +2 . . . τf +d}, dmatch(w, q, Λ) = true, if either of the following conditions hold:
+/// 1. δ∗(w, q) ∈ live(Q) or
+/// 2. ∃w1 ∈ Σ∗, w2 ∈ Σ+ such that w1.w2 = w, δ∗(w1, q) ∈ F and Λ = {} or
+/// 3. ∃w1 ∈ Σ∗, w2 ∈ Σ∗ such that w1.w2 = w, δ∗(w1, q) ∈ F, and dmatch(w2, qτf +10 , {τf +2 . . . τf +d}) = true where qτf +10 is the start state corresponding to the DFA for τf +1.
+///
+pub fn dmatch<'a>(
+    input: &'a [u8],
+    dfa: &DFA,
+    starting_state: &StateID,
+    sequence_of_terminals: &Vec<Terminal<'a>>,
+) -> bool {
+    //	println!("{} {}", string, starting_state.regex);
+
+    // We'll need this later.
+    let mut state: StateID = starting_state.clone();
+
+    // Case 1: the DFA, starting at this state, consumes the entire input and is still alive.
+    for &b in input {
+        state = dfa.next_state(state, b);
+    }
+    // Neither dead nor quit means we could match in the future and so are live.
+    if !(dfa.is_dead_state(state) || dfa.is_quit_state(state)) {
+        return true;
+    }
+
+    // Case 2: The DFA consumes a prefix of the string, leaves a non-zero
+    // suffix, and there is no sequence of terminals to follow. Assume that
+    // grammars respect the maximum munch principle, so w1 is the maximal
+    // matching prefix.
+    state = starting_state.clone(); // Reset to initial state.
+    let mut index_reached: usize = 0;
+    for (i, &b) in input.iter().enumerate() {
+        state = dfa.next_state(state, b);
+        if dfa.is_dead_state(state) | dfa.is_quit_state(state) {
+            // We've failed to match, so stop feeding tokens in.
+            break;
+        }
+
+        if dfa.is_match_state(state) {
+            // We haven't yet failed to match, so keep count of how far
+            // we've gotten in the input.
+            index_reached = i;
+        }
+    }
+
+    if index_reached > 0 && sequence_of_terminals.is_empty() {
+        // We matched at least some bytes and have no more terminals
+        // to check.
+        return true;
+    }
+
+    // Case 3: A prefix of the string is successfully consumed by the DFA, and
+    // dmatch is true starting at the next member of sequence_of_terminals.
+    state = starting_state.clone();
+    for (i, &b) in input.iter().enumerate() {
+        state = dfa.next_state(state, b);
+
+        if !dfa.is_dead_state(state) {
+            // Keep munching as long as we're alive.
+            continue;
+        }
+
+        if dfa.is_dead_state(state) && i == 0 {
+            // We failed on the first character, so give up.
+            break;
+        }
+
+        // We've consumed at least one byte, the DFA is now dead, and there
+        // are more terminals to check.
+        if i > 0 && dfa.is_dead_state(state) && !sequence_of_terminals.is_empty() {
+            let Ok(mut new_dfa) = (&sequence_of_terminals[0]) else {
+                panic!()
+            };
+
+            return dmatch(
+                &input[i - 1..],
+                &mut new_dfa.clone(),
+                new_dfa
+                    .dfa
+                    .start_state(Config::new().anchored(Anchored::Yes)),
+                &sequence_of_terminals[1..].to_vec(),
+            );
+        }
+    }
+
+    // None of the previous cases succeeded, so dmatch is false.
+    false
 }
 
-impl Masker {
-    /// Compute whether the string could match a sequence of terminals starting at a certain state in the first DFA.
-    ///
-    /// Given a DFA D(Q, Σ, δ, q0, F ), a string w ∈ Σ∗, a DFA state q ∈ Q and any sequence of terminals Λ = {τf +1, τf +2 . . . τf +d}, dmatch(w, q, Λ) = true, if either of the following conditions hold:
-    /// 1. δ∗(w, q) ∈ live(Q) or
-    /// 2. ∃w1 ∈ Σ∗, w2 ∈ Σ+ such that w1.w2 = w, δ∗(w1, q) ∈ F and Λ = {} or
-    /// 3. ∃w1 ∈ Σ∗, w2 ∈ Σ∗ such that w1.w2 = w, δ∗(w1, q) ∈ F, and dmatch(w2, qτf +10 , {τf +2 . . . τf +d}) = true where qτf +10 is the start state corresponding to the DFA for τf +1.
-    ///
-    pub fn dmatch(
-        &mut self,
-        string: &str,
-        starting_state: &mut DFAState,
-        sequence_of_terminals: Vec<&str>,
-    ) -> bool {
-        //	println!("{} {}", string, starting_state.regex);
+/// Compute the mask for a given DFA state, terminal sequence, and vocabulary.
+///
+/// Mα(q, Λ) = m is a binary mask such that t ∈ set(m) if dmatch(t, q, Λ),
+/// where t is a string (token in the LLM's vocabulary), q is a DFA state, and
+/// Λ is an accept sequence.
+pub fn dfa_mask<'a>(
+    dfa: &DFA,
+    starting_state: &StateID,
+    terminal_sequence: &Vec<Terminal<'a>>,
+    vocabulary: &Vec<&'a [u8]>,
+) -> Vec<bool> {
+    let mut mask: Vec<bool> = Vec::with_capacity(vocabulary.len());
+    for token in vocabulary {
+        // Since the state is mutated by dmatch (potentially bad API design
+        // on my part), make a new one each time we try to match a token.
+        mask.push(dmatch(token, dfa, starting_state, terminal_sequence));
+    }
+    mask
+}
 
-        // We'll need this later.
-        let initial_state = starting_state.state_id;
-        let mut state: StateID;
-
-        // Case 1: the DFA, starting at this state, consumes the entire input and is still alive.
-        state = starting_state.advance(string);
-        // Neither dead nor quit means we could match in the future and so are live.
-        if !(starting_state.dfa.is_dead_state(state) || starting_state.dfa.is_quit_state(state)) {
-            return true;
+/// Compute the grammar mask store.
+///
+/// For an integer α, the DFA mask store Mα is a function defined as Mα : QΩ ×
+/// Γα → {0, 1}|V |, where QΩ = ⋃ τ ∈Γ Qτ represents the set of all DFA states
+/// and Γα is a set of α-length terminal sequences. Then Mα(q, Λ) = m is a
+/// binary mask such that t ∈ set(m) if dmatch(t, q, Λ)The mask store is
+/// constructed offline by enumerating all DFA states QΩ considering all
+/// possible terminals in Γ, and all tokens in V. The DFA mask store depends on
+/// the set of terminals Γ and the model’s vocabulary V. As a result, a unique
+/// mask store is created for each grammar and tokenizer combination, and to
+/// enhance efficiency, we cache and reuse this table for future inferences.
+pub fn dfa_mask_store(
+    lexical_terminals: Vec<Terminal>,
+    model_vocabulary: Vec<&'a str>,
+    _length_of_terminal_sequences: usize,
+) -> HashMap<(DFAState, Vec<&'a str>), Vec<bool>> {
+    let all_states = all_dfa_states(&lexical_terminals);
+    let mut store: HashMap<(DFAState, Vec<&str>), Vec<bool>> = HashMap::new();
+    for mut state in all_states {
+        for first_terminal in lexical_terminals.iter() {
+            //		for second_terminal in lexical_terminals.iter() {
+            store.insert(
+                (
+                    state.clone(),
+                    vec![
+                        first_terminal, // second_terminal
+                    ],
+                ),
+                self.dfa_mask(
+                    &mut state,
+                    &vec![
+                        first_terminal, // second_terminal
+                    ],
+                    &model_vocabulary,
+                ),
+            );
+            //		}
         }
+    }
+    store
+}
 
-        // Case 2: The DFA consumes a prefix of the string, leaves a non-zero
-        // suffix, and there is no sequence of terminals to follow. Assume that
-        // grammars respect the maximum munch principle, so w1 is the maximal
-        // matching prefix.
-        starting_state.state_id = initial_state; // Reset to initial state.
-        let mut index_reached: usize = 0;
-        for (i, c) in string.char_indices() {
-            state = starting_state.consume_character(c);
-            if starting_state.dfa.is_dead_state(state) | starting_state.dfa.is_quit_state(state) {
-                break;
-            }
+/// Compute the mask for a given accept sequence and remainder.
+///
+/// Implement algorithm 2 from the paper.
+fn grammar_mask(
+    accept_sequences: &Vec<Vec<&Terminal>>,
+    remainder: &Token,
+    model_vocabulary: &Vec<&[u8]>,
+) -> Vec<bool> {
+    let mut mask: Vec<bool> = vec![false; model_vocabulary.len()];
+    for accept_sequence in accept_sequences {
+        let first_terminal = accept_sequence[0];
+        // Get the start state for the first terminal in the accept sequence.
+        let Ok(start_state) = first_terminal
+            .dfa
+            .start_state(&Config::new().anchored(Anchored::Yes))
+        else {
+            panic!(
+                "When computing the grammar mask, we failed to get a start state for the terminal {:?}.",
+                first_terminal
+            );
+        };
 
-            if starting_state.dfa.is_match_state(state) {
-                index_reached = i;
-            }
-        }
-
-        if index_reached > 0 && sequence_of_terminals.is_empty() {
-            return true;
-        }
-
-        // Case 3: A prefix of the string is successfully consumed by the DFA, and
-        // dmatch is true starting at the next member of sequence_of_terminals.
-        starting_state.state_id = initial_state;
-        for (i, c) in string.char_indices() {
-            state = starting_state.consume_character(c);
-
-            if !starting_state.dfa.is_dead_state(state) {
-                // Keep munching as long as we're alive.
-                continue;
-            }
-
-            if starting_state.dfa.is_dead_state(state) && i == 0 {
-                // We failed on the first character.
-                break;
-            }
-
-            // Handle case where we consume one character too many by slicing
-            // the string before the character we just saw, but only if we
-            // ended up matching at least one character.
-            if starting_state.dfa.is_dead_state(state) && !sequence_of_terminals.is_empty() && i > 0
+        // Feed the remainder into the DFA.
+        let end_state = first_terminal.advance(start_state, remainder.value);
+        // Check whether the DFA ended up in a live state.
+        if !(first_terminal.dfa.is_dead_state(end_state)
+            || first_terminal.dfa.is_quit_state(end_state))
+        {
+            let store_size = accept_sequence.len() - 1;
+            // Take the union of the mask we've computed so far and the mask from the store.
+            for (i, (cur, new)) in zip(
+                mask.clone(),
+                // Get the relevant mask out of the store.
+                mask_store.get(store_size, first_terminal, end_state, accept_sequence[1..]),
+            )
+            .enumerate()
             {
-                let mut new_dfa = self.dfa_builder.build_dfa(sequence_of_terminals[0]);
-                return self.dmatch(
-                    &string.chars().skip(i - 1).collect::<String>(),
-                    &mut new_dfa,
-                    sequence_of_terminals[1..].to_vec(),
-                );
+                mask[i] = cur || new;
             }
         }
-
-        // None of the previous cases succeeded, so dmatch is false.
-        false
     }
-
-    /// Compute the mask for a given DFA state, terminal sequence, and vocabulary.
-    ///
-    /// Mα(q, Λ) = m is a binary mask such that t ∈ set(m) if dmatch(t, q, Λ),
-    /// where t is a string (token in the LLM's vocabulary), q is a DFA state, and
-    /// Λ is an accept sequence.
-    pub fn dfa_mask(
-        &mut self,
-        state: &mut DFAState,
-        terminal_sequence: &Vec<&str>,
-        vocabulary: &Vec<&str>,
-    ) -> Vec<bool> {
-        let mut mask: Vec<bool> = Vec::new();
-        for token in vocabulary {
-            // Since the state is mutated by dmatch (potentially bad API design
-            // on my part), make a new one each time we try to match a token.
-            let mut starting_state = state.clone();
-            mask.push(self.dmatch(token, &mut starting_state, terminal_sequence.clone()));
-        }
-        mask
-    }
-
-    /// Compute the grammar mask store.
-    ///
-    /// For an integer α, the DFA mask store Mα is a function defined as Mα : QΩ ×
-    /// Γα → {0, 1}|V |, where QΩ = ⋃ τ ∈Γ Qτ represents the set of all DFA states
-    /// and Γα is a set of α-length terminal sequences. Then Mα(q, Λ) = m is a
-    /// binary mask such that t ∈ set(m) if dmatch(t, q, Λ)The mask store is
-    /// constructed offline by enumerating all DFA states QΩ considering all
-    /// possible terminals in Γ, and all tokens in V. The DFA mask store depends on
-    /// the set of terminals Γ and the model’s vocabulary V. As a result, a unique
-    /// mask store is created for each grammar and tokenizer combination, and to
-    /// enhance efficiency, we cache and reuse this table for future inferences.
-    pub fn dfa_mask_store<'a>(
-        &mut self,
-        lexical_terminals: Vec<&'a str>,
-        model_vocabulary: Vec<&'a str>,
-        _length_of_terminal_sequences: usize,
-    ) -> HashMap<(DFAState, Vec<&'a str>), Vec<bool>> {
-        let all_states = all_dfa_states(&lexical_terminals);
-        let mut store: HashMap<(DFAState, Vec<&str>), Vec<bool>> = HashMap::new();
-        for mut state in all_states {
-            for first_terminal in lexical_terminals.iter() {
-                //		for second_terminal in lexical_terminals.iter() {
-                store.insert(
-                    (
-                        state.clone(),
-                        vec![
-                            first_terminal, // second_terminal
-                        ],
-                    ),
-                    self.dfa_mask(
-                        &mut state,
-                        &vec![
-                            first_terminal, // second_terminal
-                        ],
-                        &model_vocabulary,
-                    ),
-                );
-                //		}
-            }
-        }
-
-        store
-    }
-
-    pub fn new() -> Masker {
-        Masker {
-            dfa_builder: DFABuilder::new(),
-        }
-    }
-
-    // /// Implement algorithm 2 from the paper.
-    // fn grammar_mask(
-    // 	&mut self,
-    // 	accept_sequences: Vec<Vec<&str>>,
-    // 	remainder: &str,
-    // 	model_vocabulary: Vec<&str>,
-    // ) -> Vec<bool> {
-    // 	let mut res_mask: Vec<bool> = vec![false; model_vocabulary.len()];
-    // 	for accept_sequence in accept_sequences {
-    //         let dfa = self.dfa_builder.build_dfa(accept_sequence[0]);
-    //         dfa.advance(remainder);
-    //         let mask = self.dfa_mask(&dfa, &accept_sequence[1..].to_vec(), &model_vocabulary);
-    //         for (i, (cur, new)) in zip(res_mask.clone(), mask.clone()).enumerate() {
-    // 		res_mask[i] = cur | new;
-    //         }
-    // 	}
-    // 	res_mask
-    // }
-}
-
-#[pyfunction]
-fn dfa_mask_store_py<'py>(lexical_terminals: Vec<PyBackedStr>, model_vocabulary: Vec<PyBackedStr>) {
-    let mut matcher = Masker {
-        dfa_builder: DFABuilder::new(),
-    };
-    // Nonsense casts to make the compiler happy.
-    let terms: Vec<&str> = lexical_terminals
-        .iter()
-        .map(|s| s.get(..).unwrap())
-        .collect();
-    let vocab: Vec<&str> = model_vocabulary
-        .iter()
-        .map(|s| s.get(..).unwrap())
-        .collect();
-    matcher.dfa_mask_store(terms, vocab, 2);
-}
-
-#[pymodule]
-fn rust_syncode(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(dfa_mask_store_py, m)?)
+    mask
 }
 
 #[cfg(test)]
@@ -218,12 +215,18 @@ mod tests {
 
     #[test]
     fn test_dmatch_case1() {
-        let candidate_string = "abba";
+        let candidate_string = "abba".as_bytes();
         let mut matcher = Masker {
             dfa_builder: DFABuilder::new(),
         };
-        let mut starting_state = matcher.dfa_builder.build_dfa(r"[ab]*cd");
-        let accept_sequence: Vec<&str> = Vec::new();
+        let Ok(mut starting_state) = matcher.dfa_builder.build_dfa(&Terminal {
+            name: "",
+            pattern: r"[ab]*cd",
+            priority: 0,
+        }) else {
+            panic!()
+        };
+        let accept_sequence: Vec<Terminal> = Vec::new();
         assert!(matcher.dmatch(candidate_string, &mut starting_state, accept_sequence));
     }
 
