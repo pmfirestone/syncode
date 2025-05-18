@@ -1,0 +1,14 @@
+/Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/deps/libpyo3_build_config-eb1eb05004ed9295.rmeta: /Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/lib.rs /Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/errors.rs /Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/impl_.rs /Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/build/pyo3-build-config-a2d265fcbeabc3ea/out/pyo3-build-config-file.txt /Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/build/pyo3-build-config-a2d265fcbeabc3ea/out/pyo3-build-config.txt
+
+/Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/deps/libpyo3_build_config-eb1eb05004ed9295.rlib: /Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/lib.rs /Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/errors.rs /Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/impl_.rs /Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/build/pyo3-build-config-a2d265fcbeabc3ea/out/pyo3-build-config-file.txt /Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/build/pyo3-build-config-a2d265fcbeabc3ea/out/pyo3-build-config.txt
+
+/Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/deps/pyo3_build_config-eb1eb05004ed9295.d: /Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/lib.rs /Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/errors.rs /Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/impl_.rs /Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/build/pyo3-build-config-a2d265fcbeabc3ea/out/pyo3-build-config-file.txt /Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/build/pyo3-build-config-a2d265fcbeabc3ea/out/pyo3-build-config.txt
+
+/Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/lib.rs:
+/Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/errors.rs:
+/Users/pmf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.23.5/src/impl_.rs:
+/Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/build/pyo3-build-config-a2d265fcbeabc3ea/out/pyo3-build-config-file.txt:
+/Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/build/pyo3-build-config-a2d265fcbeabc3ea/out/pyo3-build-config.txt:
+
+# env-dep:CARGO_PKG_VERSION=0.23.5
+# env-dep:OUT_DIR=/Users/pmf/src/syncode-trees/rust/syncode/mask_store/target/debug/build/pyo3-build-config-a2d265fcbeabc3ea/out
