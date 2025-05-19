@@ -1,3 +1,5 @@
+.gitignore
+target/
 results/
 core/__pycache__
 __pycache__
@@ -11,3 +13,5 @@ cache/
 dist/
 syncode.egg-info/
 syncode/parsers/rust_parser/target/*
+*~
+*.lock
