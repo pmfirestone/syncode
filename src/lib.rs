@@ -3,11 +3,12 @@
 //! generation. It forces an LLM to generate sequences that satisfy a given LR
 //! grammar.
 // pub mod dfa;
-// pub mod lexer;
 // pub mod mask;
-// pub mod parser;
+pub mod grammar;
+pub mod lexer;
+pub mod parser;
 pub mod table;
-// pub mod types;
+pub mod types;
 // mod python_bindings;
 // mod util;
 

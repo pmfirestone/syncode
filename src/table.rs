@@ -12,121 +12,52 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// A terminal of the grammar.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub struct Terminal<'a> {
-    /// The name of this terminal in the grammar.
-    name: &'a str,
-    /// The regex describing this terminal.
-    pattern: &'a str,
-    /// This terminal's priority in lexing.
-    priority: i32,
-}
-
-/// A type alias for nonterminals of the grammar, purely for readability.
-pub type NonTerminal<'a> = &'a str;
-
-/// An enumeration for symbols of the grammar, to act as a union type of terminals and nonterminals.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-enum Symbol {
-    Terminal(Terminal<'static>),
-    NonTerminal(NonTerminal<'static>),
-}
+use crate::types::*;
 
 /// A convenience terminal representing the empty string.
-static EPSILON: Terminal<'static> = Terminal {
+const EPSILON: Terminal<'static> = Terminal {
     name: "epsilon",
     pattern: "",
+    dfa: None,
     priority: 0,
 };
 
 /// A convenience terminal representing the end of the input.
-static EOF: Terminal<'static> = Terminal {
+const EOF: Terminal<'static> = Terminal {
     name: "$",
     pattern: "",
+    dfa: None,
     priority: 0,
 };
 
-/// A single production of the grammar.
-///
-/// That this is exactly a single production, so productions that can go to
-/// more than one outcome have to be represented by more than one production in
-/// the grammar.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub struct Production {
-    /// The left hand side of the production.
-    source: NonTerminal<'static>,
-    /// The right hand side of the production.
-    result: Vec<Symbol>,
-}
-
-/// A context-free grammar.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub struct Grammar {
-    /// The set of symbols that are active in this grammar.
-    symbol_set: Vec<Symbol>,
-    /// The first production; this one is the augmented one added to the grammar.
-    start_production: Production,
-    /// The productions that make up this grammar, including the start_production.
-    productions: Vec<Production>,
-}
-
-/// An item of the item set for LR parsing.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-struct Item {
-    /// The production that this item contains.
-    production: Production,
-    /// The position of the dot in the result. Invariant: must be in [0, result.len()].
-    dot: usize,
-    /// The look ahead terminal.
-    lookahead: Terminal<'static>,
-}
-
-/// Action enum for LR parsing.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Action {
-    /// Consume a terminal from input, going to the indicated state.
-    Shift(usize),
-    /// Reduce the symbols on the stack according to the production.
-    Reduce(Production),
-    /// Accept the input.
-    Accept,
-    /// Fail to accept the input.
-    Error,
-}
-
-type ActionTable = HashMap<(usize, Terminal<'static>), Action>;
-type GotoTable = HashMap<(usize, NonTerminal<'static>), usize>;
-
-
 fn symbol_first(symbol: &Symbol, grammar: &Grammar) -> HashSet<Terminal<'static>> {
     match symbol {
-	// If symbol is a terminal, then first(symbol) = {symbol}.
-	Symbol::Terminal(terminal) => return HashSet::from([terminal.clone()]),
-	// If symbol is a nonterminal...
-	Symbol::NonTerminal(nonterminal) => {
-	    let mut first_set = HashSet::new();
-	    for production in grammar.productions.clone() {
-		// And symbol -> y1y2...yk for some k >= 1,
-		if production.source == *nonterminal {
-		    for symbol in &production.result {
-			// Place the contents of the first set of the resulting
-			// symbol into this symbol's first set...
-			let first = symbol_first(&symbol, grammar);
-			first_set.extend(first.clone().into_iter());
-			if production.result == vec![Symbol::Terminal(EPSILON.clone())] {
-			    // If symbol -> ϵ is a production, add ϵ to first(symbol).
-			    first_set.insert(EPSILON.clone());
-			}
-			if !first.contains(&EPSILON) {
-			    // Keep adding as long as the first sets contain ϵ.
-			    return first_set;
-			}
-		    }
-		}
-	    }
-	    first_set
-	},
+        // If symbol is a terminal, then first(symbol) = {symbol}.
+        Symbol::Terminal(terminal) => return HashSet::from([terminal.clone()]),
+        // If symbol is a nonterminal...
+        Symbol::NonTerminal(nonterminal) => {
+            let mut first_set = HashSet::new();
+            for production in grammar.productions.clone() {
+                // And symbol -> y1y2...yk for some k >= 1,
+                if production.source == *nonterminal {
+                    for symbol in &production.result {
+                        // Place the contents of the first set of the resulting
+                        // symbol into this symbol's first set...
+                        let first = symbol_first(&symbol, grammar);
+                        first_set.extend(first.clone().into_iter());
+                        if production.result == vec![Symbol::Terminal(EPSILON.clone())] {
+                            // If symbol -> ϵ is a production, add ϵ to first(symbol).
+                            first_set.insert(EPSILON.clone());
+                        }
+                        if !first.contains(&EPSILON) {
+                            // Keep adding as long as the first sets contain ϵ.
+                            return first_set;
+                        }
+                    }
+                }
+            }
+            first_set
+        }
     }
 }
 
@@ -178,12 +109,12 @@ fn closure(items: HashSet<Item>, grammar: &Grammar) -> HashSet<Item> {
         let old_item_set = item_set.clone();
         for item in item_set.clone() {
             for production in &grammar.productions[..] {
-		if item.dot == item.production.result.len() {
-		    // We only want productions that don't have the dot at the
-		    // end (and to avoid a panic when indexing at the next
-		    // check).
-		    continue;
-		}
+                if item.dot == item.production.result.len() {
+                    // We only want productions that don't have the dot at the
+                    // end (and to avoid a panic when indexing at the next
+                    // check).
+                    continue;
+                }
                 if Symbol::NonTerminal(production.source) != item.production.result[item.dot] {
                     // We only want the productions that begin with the symbol after the dot.
                     continue;
@@ -216,10 +147,10 @@ fn goto(items: &HashSet<Item>, symbol: &Symbol, grammar: &Grammar) -> HashSet<It
     // Initialize to the empty set.
     let mut result: HashSet<Item> = HashSet::new();
     for item in items {
-	// We only want items where the dot is not at the end of the result yet.
-	if item.dot == item.production.result.len() {
-	    continue;
-	}
+        // We only want items where the dot is not at the end of the result yet.
+        if item.dot == item.production.result.len() {
+            continue;
+        }
         // Add all items the return set, advancing the dot by one.
         if item.production.result[item.dot] == *symbol {
             result.insert(Item {
@@ -269,7 +200,7 @@ fn items(grammar: &Grammar) -> Vec<HashSet<Item>> {
     items
 }
 
-/// Construction the parsing tables from an augmented grammar.
+/// Construct the parsing tables from an augmented grammar.
 ///
 /// Algorithm 4.56 from Dragon Book 2e, sec. 4.7.3, p. 265.
 pub fn tables(grammar: Grammar) -> Result<(ActionTable, GotoTable), ()> {
@@ -382,16 +313,8 @@ mod tests {
                 Symbol::NonTerminal("S'"),
                 Symbol::NonTerminal("S"),
                 Symbol::NonTerminal("C"),
-                Symbol::Terminal(Terminal {
-                    name: "c",
-                    pattern: "c",
-                    priority: 0,
-                }),
-                Symbol::Terminal(Terminal {
-                    name: "d",
-                    pattern: "d",
-                    priority: 0,
-                }),
+                Symbol::Terminal(Terminal::new("c", "c", 0)),
+                Symbol::Terminal(Terminal::new("d", "d", 0)),
             ],
             start_production: Production {
                 source: "S'",
@@ -409,21 +332,13 @@ mod tests {
                 Production {
                     source: "C",
                     result: vec![
-                        Symbol::Terminal(Terminal {
-                            name: "c",
-                            pattern: "c",
-                            priority: 0,
-                        }),
+                        Symbol::Terminal(Terminal::new("c", "c", 0)),
                         Symbol::NonTerminal("C"),
                     ],
                 },
                 Production {
                     source: "C",
-                    result: vec![Symbol::Terminal(Terminal {
-                        name: "d",
-                        pattern: "d",
-                        priority: 0,
-                    })],
+                    result: vec![Symbol::Terminal(Terminal::new("d", "d", 0))],
                 },
             ],
         }
@@ -435,7 +350,7 @@ mod tests {
         let Ok((action_table, goto_table)) = tables(grammar) else {
             panic!()
         };
-	eprintln!("{:#?}", action_table);
-	eprintln!("{:#?}", goto_table);
+        eprintln!("{:#?}", action_table);
+        eprintln!("{:#?}", goto_table);
     }
 }

@@ -2,44 +2,16 @@
 //! The parser for SynCode. Takes in a lexed sequence of tokens and determines
 //! the accept sequences that could follow.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
-use std::hash::Hash;
 
-use crate::lexer::{Lexer, NonTerminal, Terminal, Token};
+use crate::lexer::Lexer;
+use crate::types::*;
 
 // Rust RFC 1733 introduces this syntax as a way to alias bounds, which would
 // make this module much more readable. Unfortunately, as of 2025-05-09, the
 // behavior is not yet stable. See
 // https://github.com/rust-lang/rfcs/blob/master/text/1733-trait-alias.md.
-
-// trait ParserStateIndex = Clone + Eq + Hash + std::fmt::Debug;
-
-/// Rule represents a grammar production rule.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Rule<'a> {
-    pub id: usize,
-    pub origin: &'a str,
-    pub expansion: Vec<&'a str>,
-}
-
-impl fmt::Display for Rule<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} -> {}", self.origin, self.expansion.join(" "))
-    }
-}
-
-/// Action enum for LR parsing.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Action<'a, S: std::fmt::Debug> {
-    Shift(S),
-    Reduce(Rule<'a>),
-    Accept,
-    Error,
-}
-
-type ActionTable<'a> = HashMap<usize, HashMap<Terminal<'a>, Action<'a, usize>>>;
-type GotoTable<'a> = HashMap<usize, HashMap<NonTerminal<'a>, usize>>;
 
 /// The Parser with its tables.
 ///
@@ -54,10 +26,10 @@ pub struct Parser<'a> {
     // is most easily gotten using the [Lexer] directly.
     pub lexer: Lexer<'a>,
     /// The action table. Each entry has an index and maps between a terminal and an action.
-    pub action_table: ActionTable<'a>,
+    pub action_table: ActionTable,
     /// The goto table. Each entry maps between a state index and a map between
     /// a non-terminal and another state index.
-    pub goto_table: GotoTable<'a>,
+    pub goto_table: GotoTable,
     /// The index of the state to start at.
     pub start_state: usize,
     /// The number of lexical tokens we have parsed so far.
@@ -67,16 +39,11 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Return the terminals that the parser will accept in the current state.
     pub fn follow(&'a self, state_stack: &Vec<usize>) -> Vec<Terminal<'a>> {
-        // Get the names of the terminals that can follow in the current state.
-        let terminal_names = self.action_table.get(state_stack.last().unwrap()).unwrap();
-
-        // Look up the Terminal structs that represent the currently-acceptable terminals.
-        self.lexer
-            .terminals
-            .iter()
-            .filter(|terminal| terminal_names.contains_key(terminal))
-            .cloned()
-            .collect::<Vec<Terminal>>()
+        self.action_table
+            .keys()
+            .filter(|key| key.0 == *state_stack.last().unwrap())
+            .map(|key| key.1.clone())
+            .collect()
     }
 
     /// Feed a token to the parser and process it according to the LR(1) algorithm.
@@ -84,7 +51,7 @@ impl<'a> Parser<'a> {
     /// The inner loop of the LR parsing algorithm.
     pub fn next(
         &'a self,
-        terminal: Terminal<'a>,
+        terminal: &Terminal<'a>,
         state_stack: Vec<usize>,
     ) -> Result<Vec<usize>, ParserError<'a>> {
         // This implementation is verbose because of the error handling
@@ -98,17 +65,9 @@ impl<'a> Parser<'a> {
                 return Err(ParserError::StackUnderflow);
             };
 
-            // Get the actions in the current state.
-            let Some(actions) = self.action_table.get(&state) else {
+            // Get the action for this state and terminal.
+            let Some(action) = self.action_table.get(&(*state, terminal.clone())) else {
                 return Err(ParserError::InvalidState(*state));
-            };
-
-            // Look up the current state and token type in the parse table.
-            let Some(action) = actions.get(&terminal.clone()) else {
-                return Err(ParserError::InvalidTerminal(
-                    terminal,
-                    self.follow(&state_stack),
-                ));
             };
 
             // eprintln!("Current state: {:?}, Token: {:?}", state, token);
@@ -125,7 +84,7 @@ impl<'a> Parser<'a> {
 
                 Action::Reduce(rule) => {
                     // On a reduce, pop states according to the rule expansion length.
-                    let size = rule.expansion.len();
+                    let size = rule.result.len();
 
                     if size > 0 {
                         // Pop the appropriate number of states.
@@ -136,18 +95,14 @@ impl<'a> Parser<'a> {
                         }
                     }
 
-                    // Look up the next state in the goto table.
+                    // Look up the current state.
                     let Some(current_state) = state_stack.last() else {
                         return Err(ParserError::StackUnderflow);
                     };
 
-                    // Get the gotos for this state.
-                    let Some(gotos) = self.goto_table.get(&current_state) else {
-                        return Err(ParserError::InvalidState(*current_state));
-                    };
-
-                    // Look up the next state in the goto table based on the rule.
-                    let Some(next_state) = gotos.get(rule.origin) else {
+                    // Get the next state for this state and nonterminal.
+                    let Some(next_state) = self.goto_table.get(&(*current_state, rule.source))
+                    else {
                         return Err(ParserError::InvalidState(*current_state));
                     };
 
@@ -182,8 +137,8 @@ impl<'a> Parser<'a> {
     // benchmarking and come back for it if we need to.
     pub fn parse(
         &'a self,
-        partial_output: &'a str,
-    ) -> Result<(Vec<Vec<Terminal<'a>>>, Token<'a>), ParserError<'a>> {
+        partial_output: &'a [u8],
+    ) -> Result<(HashSet<Vec<Terminal<'a>>>, Token<'a>), ParserError<'a>> {
         let mut a0: Vec<Terminal> = Vec::new();
         let mut a1: Vec<Terminal> = Vec::new();
 
@@ -199,7 +154,7 @@ impl<'a> Parser<'a> {
                 return Err(ParserError::InvalidToken);
             };
             // FIXME: There must be a less horrid way to do this.
-            let Ok(new_state_stack) = self.next(terminal, state_stack) else {
+            let Ok(new_state_stack) = self.next(&terminal, state_stack) else {
                 break;
             };
             state_stack = new_state_stack;
@@ -209,22 +164,22 @@ impl<'a> Parser<'a> {
 
         // There are two cases for accept sequences. See section 4.5 of the
         // paper and Algorithm 4, lines 15-21.
-        let mut accept_sequences: Vec<Vec<Terminal>> = Vec::new();
+        let mut accept_sequences: HashSet<Vec<Terminal>> = HashSet::new();
         if last_token == remainder {
             // Case 1: the remainder is the last lexical token.
             let Some(remainder_type) = remainder.clone().terminal else {
                 return Err(ParserError::StackUnderflow);
             };
             for terminal in a1 {
-                accept_sequences.push(vec![remainder_type.clone(), terminal]);
+                accept_sequences.insert(vec![remainder_type.clone(), terminal]);
             }
             for terminal in a0 {
-                accept_sequences.push(vec![terminal]);
+                accept_sequences.insert(vec![terminal]);
             }
         } else {
             // Case 2: the remainder is some unparsed nonsense.
             for terminal in a1 {
-                accept_sequences.push(vec![terminal]);
+                accept_sequences.insert(vec![terminal]);
             }
         }
         return Ok((accept_sequences, remainder));
@@ -259,164 +214,158 @@ pub enum ParserError<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
 
-    const WORD: Terminal = Terminal {
-        name: "WORD",
-        pattern: r"[a-zA-Z_]\w*",
-        priority: 2,
-    };
+    // Terminal definitions to be used throughout tests. Commented out ones may
+    // come in handy in future tests but are commented to avoid dead code warnings.
+    fn word() -> Terminal<'static> {
+        Terminal::new("WORD", r"[a-zA-Z_]\w*", 2)
+    }
 
-    const DEC_NUMBER: Terminal = Terminal {
-        name: "DEC_NUMBER",
-        pattern: r"0|[1-9]\d*",
-        priority: 1,
-    };
+    // fn string() -> Terminal<'static> {
+    //     Terminal::new("STRING", r#"("""[^"]*"""|'''[^']*''')"#, 2)
+    // }
 
-    const EOF: Terminal = Terminal {
-        name: "EOF",
-        pattern: "",
-        priority: 0,
-    };
+    fn space() -> Terminal<'static> {
+        Terminal::new("SPACE", "\\s+", 0)
+    }
 
-    const STAR: Terminal = Terminal {
-        name: "STAR",
-        pattern: r"\*",
-        priority: 1,
-    };
+    // fn equals() -> Terminal<'static> {
+    //     Terminal::new("EQUALS", "=", 1)
+    // }
 
-    const PLUS: Terminal = Terminal {
-        name: "PLUS",
-        pattern: r"\+",
-        priority: 1,
-    };
+    // fn dot() -> Terminal<'static> {
+    //     Terminal::new("DOT", r"\.", 1)
+    // }
 
-    const SPACE: Terminal = Terminal {
-        name: "SPACE",
-        pattern: r"\s+",
-        priority: 0,
-    };
+    fn dec_number() -> Terminal<'static> {
+        Terminal::new("DEC_NUMBER", r"0|[1-9]\d*", 1)
+    }
+
+    // fn oct_number() -> Terminal<'static> {
+    //     Terminal::new("OCT_NUMBER", r"(?i)0o[0-7]+", 1)
+    // }
+
+    // fn bin_number() -> Terminal<'static> {
+    //     Terminal::new("BIN_NUMBER", r"(?i)0b[0-1]+", 1)
+    // }
+
+    // fn hex_number() -> Terminal<'static> {
+    //     Terminal::new("HEX_NUMBER", r"(?i)0x[\da-f]+", 1)
+    // }
+
+    // fn float_number() -> Terminal<'static> {
+    //     Terminal::new(
+    //         "FLOAT_NUMBER",
+    //         r"((\d+\.\d*|\.\d+)(e[-+]?\d+)?|\d+(e[-+]?\d+))",
+    //         1,
+    //     )
+    // }
+
+    // fn semicolon() -> Terminal<'static> {
+    //     Terminal::new("SEMICOLON", ";", 0)
+    // }
+
+    // fn newline() -> Terminal<'static> {
+    //     Terminal::new("NEWLINE", r"\n", 1)
+    // }
+
+    fn star() -> Terminal<'static> {
+        Terminal::new("STAR", r"\*", 1)
+    }
+
+    fn plus() -> Terminal<'static> {
+        Terminal::new("PLUS", r"\+", 1)
+    }
+
+    /// A convenience terminal representing the end of the input.
+    fn eof() -> Terminal<'static> {
+        Terminal::new("$", "", 0)
+    }
 
     // Mega-simple grammar courtesy of https://en.wikipedia.org/wiki/LR_parser.
-    fn calc_rules() -> Vec<Rule<'static>> {
+    fn calc_rules() -> Vec<Production> {
         vec![
-            Rule {
-                id: 0,
-                origin: "goal",
-                expansion: vec!["sums", "EOF"],
+            Production {
+                source: "goal",
+                result: vec![Symbol::NonTerminal("sums"), Symbol::Terminal(eof())],
             },
-            Rule {
-                id: 1,
-                origin: "sums",
-                expansion: vec!["sums", "PLUS", "products"],
+            Production {
+                source: "sums",
+                result: vec![
+                    Symbol::NonTerminal("sums"),
+                    Symbol::Terminal(plus()),
+                    Symbol::NonTerminal("products"),
+                ],
             },
-            Rule {
-                id: 2,
-                origin: "sums",
-                expansion: vec!["products"],
+            Production {
+                source: "sums",
+                result: vec![Symbol::NonTerminal("products")],
             },
-            Rule {
-                id: 3,
-                origin: "products",
-                expansion: vec!["products", "STAR", "value"],
+            Production {
+                source: "products",
+                result: vec![
+                    Symbol::NonTerminal("products"),
+                    Symbol::Terminal(star()),
+                    Symbol::NonTerminal("value"),
+                ],
             },
-            Rule {
-                id: 4,
-                origin: "products",
-                expansion: vec!["value"],
+            Production {
+                source: "products",
+                result: vec![Symbol::NonTerminal("value")],
             },
-            Rule {
-                id: 5,
-                origin: "value",
-                expansion: vec!["DEC_NUMBER"],
+            Production {
+                source: "value",
+                result: vec![Symbol::Terminal(dec_number())],
             },
-            Rule {
-                id: 6,
-                origin: "value",
-                expansion: vec!["WORD"],
+            Production {
+                source: "value",
+                result: vec![Symbol::Terminal(word())],
             },
         ]
     }
 
-    fn calc_action_table() -> ActionTable<'static> {
+    fn calc_action_table() -> ActionTable {
         let rules = calc_rules();
         HashMap::from([
-            (
-                0,
-                HashMap::from([(DEC_NUMBER, Action::Shift(8)), (WORD, Action::Shift(9))]),
-            ),
-            (
-                1,
-                HashMap::from([(PLUS, Action::Shift(2)), (EOF, Action::Accept)]),
-            ),
-            (
-                2,
-                HashMap::from([(DEC_NUMBER, Action::Shift(8)), (WORD, Action::Shift(9))]),
-            ),
-            (
-                3,
-                HashMap::from([
-                    (STAR, Action::Shift(5)),
-                    (PLUS, Action::Reduce(rules[1].clone())),
-                ]),
-            ),
-            (
-                4,
-                HashMap::from([
-                    (STAR, Action::Shift(5)),
-                    (PLUS, Action::Reduce(rules[2].clone())),
-                    (EOF, Action::Reduce(rules[2].clone())),
-                ]),
-            ),
-            (
-                5,
-                HashMap::from([(DEC_NUMBER, Action::Shift(8)), (WORD, Action::Shift(9))]),
-            ),
-            (
-                6,
-                HashMap::from([
-                    (STAR, Action::Reduce(rules[3].clone())),
-                    (PLUS, Action::Reduce(rules[3].clone())),
-                    (EOF, Action::Reduce(rules[3].clone())),
-                ]),
-            ),
-            (
-                7,
-                HashMap::from([
-                    (STAR, Action::Reduce(rules[4].clone())),
-                    (PLUS, Action::Reduce(rules[4].clone())),
-                    (EOF, Action::Reduce(rules[4].clone())),
-                ]),
-            ),
-            (
-                8,
-                HashMap::from([
-                    (STAR, Action::Reduce(rules[5].clone())),
-                    (PLUS, Action::Reduce(rules[5].clone())),
-                    (EOF, Action::Reduce(rules[5].clone())),
-                ]),
-            ),
-            (
-                9,
-                HashMap::from([
-                    (STAR, Action::Reduce(rules[6].clone())),
-                    (PLUS, Action::Reduce(rules[6].clone())),
-                    (EOF, Action::Reduce(rules[6].clone())),
-                ]),
-            ),
+            ((0, dec_number()), Action::Shift(8)),
+            ((0, word()), Action::Shift(9)),
+            ((1, plus()), Action::Shift(2)),
+            ((1, eof()), Action::Accept),
+            ((2, dec_number()), Action::Shift(8)),
+            ((2, word()), Action::Shift(9)),
+            ((3, star()), Action::Shift(5)),
+            ((3, plus()), Action::Reduce(rules[1].clone())),
+            ((4, star()), Action::Shift(5)),
+            ((4, plus()), Action::Reduce(rules[2].clone())),
+            ((4, eof()), Action::Reduce(rules[2].clone())),
+            ((5, dec_number()), Action::Shift(8)),
+            ((5, word()), Action::Shift(9)),
+            ((6, star()), Action::Reduce(rules[3].clone())),
+            ((6, plus()), Action::Reduce(rules[3].clone())),
+            ((6, eof()), Action::Reduce(rules[3].clone())),
+            ((7, star()), Action::Reduce(rules[4].clone())),
+            ((7, plus()), Action::Reduce(rules[4].clone())),
+            ((7, eof()), Action::Reduce(rules[4].clone())),
+            ((8, star()), Action::Reduce(rules[5].clone())),
+            ((8, plus()), Action::Reduce(rules[5].clone())),
+            ((8, eof()), Action::Reduce(rules[5].clone())),
+            ((9, star()), Action::Reduce(rules[6].clone())),
+            ((9, plus()), Action::Reduce(rules[6].clone())),
+            ((9, eof()), Action::Reduce(rules[6].clone())),
         ])
     }
 
-    fn calc_goto_table() -> GotoTable<'static> {
+    fn calc_goto_table() -> GotoTable {
         HashMap::from([
-            (
-                0,
-                HashMap::from([("sums", 1), ("products", 4), ("value", 7)]),
-            ),
-            (2, HashMap::from([("products", 3), ("value", 7)])),
-            (5, HashMap::from([("value", 6)])),
+            ((0, "sums"), 1),
+            ((0, "products"), 4),
+            ((0, "value"), 7),
+            ((2, "products"), 3),
+            ((2, "value"), 7),
+            ((5, "value"), 6),
         ])
     }
 
@@ -425,8 +374,8 @@ mod tests {
         let goto_table = calc_goto_table();
 
         let Ok(lexer) = Lexer::new(
-            vec![WORD, STAR, DEC_NUMBER, PLUS, SPACE],
-            HashSet::from([SPACE]),
+            vec![word(), star(), dec_number(), plus(), space()],
+            HashSet::from([space()]),
         ) else {
             panic!()
         };
@@ -443,30 +392,31 @@ mod tests {
     #[test]
     fn calc_grammar_step_through_states() {
         let parser = calc_parser();
-        let terminals_to_parse: Vec<Terminal> = vec![WORD, STAR, DEC_NUMBER, PLUS, DEC_NUMBER];
+        let terminals_to_parse: Vec<Terminal> =
+            vec![word(), star(), dec_number(), plus(), dec_number()];
         let state_stack: Vec<usize> = vec![parser.start_state];
 
-        let Ok(state_stack) = parser.next(terminals_to_parse[0].clone(), state_stack) else {
+        let Ok(state_stack) = parser.next(&terminals_to_parse[0], state_stack) else {
             panic!()
         };
         assert_eq!(9, *state_stack.last().unwrap());
 
-        let Ok(state_stack) = parser.next(terminals_to_parse[1].clone(), state_stack) else {
+        let Ok(state_stack) = parser.next(&terminals_to_parse[1], state_stack) else {
             panic!()
         };
         assert_eq!(5, *state_stack.last().unwrap());
 
-        let Ok(state_stack) = parser.next(terminals_to_parse[2].clone(), state_stack) else {
+        let Ok(state_stack) = parser.next(&terminals_to_parse[2], state_stack) else {
             panic!()
         };
         assert_eq!(8, *state_stack.last().unwrap());
 
-        let Ok(state_stack) = parser.next(terminals_to_parse[3].clone(), state_stack) else {
+        let Ok(state_stack) = parser.next(&terminals_to_parse[3], state_stack) else {
             panic!()
         };
         assert_eq!(2, *state_stack.last().unwrap());
 
-        let Ok(state_stack) = parser.next(terminals_to_parse[4].clone(), state_stack) else {
+        let Ok(state_stack) = parser.next(&terminals_to_parse[4], state_stack) else {
             panic!()
         };
         assert_eq!(8, *state_stack.last().unwrap());
@@ -476,15 +426,15 @@ mod tests {
     fn end_to_end_parse() {
         let parser = calc_parser();
 
-        let input = "A * 2 + 1";
+        let input = "A * 2 + 1".as_bytes();
 
         let Ok((accept_sequences, remainder)) = parser.parse(input) else {
             panic!()
         };
         assert_eq!(
             Token {
-                value: "1",
-                terminal: Some(DEC_NUMBER),
+                value: "1".as_bytes(),
+                terminal: Some(dec_number()),
                 start_pos: 8,
                 end_pos: 9,
                 line: 1,
@@ -495,8 +445,25 @@ mod tests {
             remainder
         );
         // It's not clear to me exactly what the semantics are here
-        // w.r.t. whitespace and other ignored terminals.
-        assert_eq!(Vec::<Vec::<Terminal>>::new(), accept_sequences);
+        // w.r.t. whitespace and other ignored terminals. Also, how do we deal
+        // with the possibilty that the remainder could change lexical type,
+        // even to types that aren't permitted? As it is, the algorithm allows
+        // a DEC_NUMBER to change to a WORD, even though that isn't actually
+        // possible in the grammar: semantically, what this says is that
+        // instead of being a DEC_NUMBER, the last lexical token could have
+        // been a WORD, which is technically true. Nevertheless, we already
+        // have enough information to know that the last token couldn't
+        // possibly become a WORD and could only continue to be a DEC_NUMBER.
+        assert_eq!(
+            HashSet::from([
+                vec![dec_number(), star()],
+                vec![dec_number(), plus()],
+                vec![dec_number(), eof()],
+                vec![word()],
+                vec![dec_number()]
+            ]),
+            accept_sequences
+        );
     }
 }
 
@@ -510,7 +477,7 @@ impl fmt::Display for ParserError<'_> {
             } => {
                 write!(
                     f,
-                    "Unexpected token '{}' (type: {}) at line {}, column {}. Expected one of: {:?}",
+                    "Unexpected token '{:?}' (type: {}) at line {}, column {}. Expected one of: {:?}",
                     token.value,
                     token.terminal.clone().unwrap().name,
                     token.line,
