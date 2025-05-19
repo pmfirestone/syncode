@@ -1,24 +1,21 @@
 // src/dfa.rs
-//! The DFA logic for SynCode. Used by `mask` to generate the mask store.
+//! DFA helper functions. This module primarily exists to export
+//! `all_dfa_states`, which is sued to construct the mask store.
 
+use crate::types::Terminal;
 use regex_automata::{
     Anchored,
     dfa::{Automaton, dense},
     util::{primitives::StateID, start},
 };
-use std::collections::{HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 
-use crate::types::{DFA, Terminal, Token};
-
-type DFACache<'a> = Vec<Rc<DFA>>;
+use std::collections::VecDeque;
 
 /// Return all states of a dfa by breadth-first search. There exists a private
 /// method that returns an iterator over all states. The suggested alternative
 /// is to traverse the graph manually. See
 /// <https://github.com/rust-lang/regex/discussions/1223>.
-pub fn states(dfa: &DFA) -> Vec<StateID> {
+fn states(dfa: &dense::DFA<Vec<u32>>) -> Vec<StateID> {
     let mut queue: VecDeque<StateID> = VecDeque::new();
     let mut explored: Vec<StateID> = Vec::new();
 
@@ -49,54 +46,13 @@ pub fn states(dfa: &DFA) -> Vec<StateID> {
 }
 
 /// Compute the union of all states of a list of terminals.
-pub fn all_dfa_states<'a>(terminals: &Vec<Terminal<'a>>) -> Vec<DFAState<'a>> {
+pub fn all_dfa_states(terminals: &Vec<Terminal<'static>>) -> Vec<(Terminal<'static>, StateID)> {
     let mut res = Vec::new();
-    let mut builder = DFABuilder::new();
     for terminal in terminals.iter() {
-        let Ok(dfa) = builder.build_dfa(terminal) else {
-            panic!()
-        };
-        for state in dfa.states() {
-            res.push(DFAState {
-                terminal: terminal.clone(),
-                dfa: dfa.dfa.clone(),
-                state_id: state,
-            });
+        let dfa = &terminal.dfa;
+        for state in states(&dfa) {
+            res.push((terminal.clone(), state));
         }
     }
     res
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_advance_match() {
-        let mut builder = DFABuilder::new();
-        let Ok(mut dfa_state) = builder.build_dfa(&Terminal {
-            name: "",
-            pattern: "r[ab¥]*",
-            priority: 0,
-        }) else {
-            panic!()
-        };
-        let mut state = dfa_state.advance("aabb¥aab".as_bytes());
-        state = dfa_state.dfa.next_eoi_state(state);
-        assert!(dfa_state.dfa.is_match_state(state));
-    }
-
-    #[test]
-    fn test_advance_fails_to_match() {
-        let mut builder = DFABuilder::new();
-        let Ok(mut dfa_state) = builder.build_dfa(&Terminal {
-            name: "",
-            pattern: r"[ab]*",
-            priority: 0,
-        }) else {
-            panic!()
-        };
-        let mut state = dfa_state.advance("aabba¥ab".as_bytes());
-        state = dfa_state.dfa.next_eoi_state(state);
-        assert!(!dfa_state.dfa.is_match_state(state));
-    }
 }

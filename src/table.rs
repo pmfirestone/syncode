@@ -15,20 +15,18 @@ use std::collections::{HashMap, HashSet};
 use crate::types::*;
 
 /// A convenience terminal representing the empty string.
-const EPSILON: Terminal<'static> = Terminal {
-    name: "epsilon",
-    pattern: "",
-    dfa: None,
-    priority: 0,
-};
+fn epsilon() -> Terminal<'static> { Terminal::new(
+ "epsilon",
+ "",
+ 0,
+)}
 
 /// A convenience terminal representing the end of the input.
-const EOF: Terminal<'static> = Terminal {
-    name: "$",
-    pattern: "",
-    dfa: None,
-    priority: 0,
-};
+fn eof() -> Terminal<'static> { Terminal::new(
+ "$",
+ "",
+ 0,
+)}
 
 fn symbol_first(symbol: &Symbol, grammar: &Grammar) -> HashSet<Terminal<'static>> {
     match symbol {
@@ -45,11 +43,11 @@ fn symbol_first(symbol: &Symbol, grammar: &Grammar) -> HashSet<Terminal<'static>
                         // symbol into this symbol's first set...
                         let first = symbol_first(&symbol, grammar);
                         first_set.extend(first.clone().into_iter());
-                        if production.result == vec![Symbol::Terminal(EPSILON.clone())] {
+                        if production.result == vec![Symbol::Terminal(epsilon())] {
                             // If symbol -> ϵ is a production, add ϵ to first(symbol).
-                            first_set.insert(EPSILON.clone());
+                            first_set.insert(epsilon());
                         }
-                        if !first.contains(&EPSILON) {
+                        if !first.contains(&epsilon()) {
                             // Keep adding as long as the first sets contain ϵ.
                             return first_set;
                         }
@@ -76,12 +74,12 @@ fn string_first(string: Vec<Symbol>, grammar: &Grammar) -> HashSet<Terminal<'sta
     for (idx, outer_symbol) in string.into_iter().enumerate() {
         let first_of_this_symbol = symbol_first(&outer_symbol, &grammar);
         for inner_symbol in &first_of_this_symbol {
-            if inner_symbol != &EPSILON {
+            if inner_symbol != &epsilon() {
                 // Add all the non-𝜖 symbols of first(outer_symbol) to first(string).
                 first_set.insert(inner_symbol.clone());
             }
         }
-        if first_of_this_symbol.contains(&EPSILON) {
+        if first_of_this_symbol.contains(&epsilon()) {
             // If 𝜖 is in first(outer_symbol), also add the non-𝜖 symbols of
             // the first set of the next symbol in string.
             if idx == string_length - 1 {
@@ -89,7 +87,7 @@ fn string_first(string: Vec<Symbol>, grammar: &Grammar) -> HashSet<Terminal<'sta
                 //
                 // This is a horrible kludgy way to check whether or not this
                 // is the last time through the loop.
-                first_set.insert(EPSILON.clone());
+                first_set.insert(epsilon());
             }
             continue;
         } else {
@@ -173,7 +171,7 @@ fn items(grammar: &Grammar) -> Vec<HashSet<Item>> {
         HashSet::from([Item {
             production: grammar.clone().start_production,
             dot: 0,
-            lookahead: EOF.clone(),
+            lookahead: eof(),
         }]),
         &grammar,
     )]);
@@ -265,15 +263,15 @@ pub fn tables(grammar: Grammar) -> Result<(ActionTable, GotoTable), ()> {
             // If [S' -> S·, EOF] is in item_set_i, then set action_table[i, EOF] to accept.
             if item.production.source == grammar.start_production.source
                 && item.dot == item.production.result.len()
-                && item.lookahead == EOF
+                && item.lookahead == eof()
             {
-                if action_table.contains_key(&(*state_id, EOF.clone())) {
+                if action_table.contains_key(&(*state_id, eof())) {
                     // If any conflicting actions result from the above rules, the
                     // algorithm fails to produce a parser because the grammar is not
                     // LR(1).
                     return Err(());
                 }
-                action_table.insert((*state_id, EOF.clone()), Action::Accept);
+                action_table.insert((*state_id, eof()), Action::Accept);
             }
         }
         // The goto transitions for state state_id are constructed for all

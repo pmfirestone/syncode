@@ -42,8 +42,8 @@ pub struct Terminal<'a> {
     pub name: &'a str,
     /// The regex describing this terminal.
     pub pattern: &'a str,
-    /// The DFA that matches this terminal. Make it an option to support const Terminals in [crate::table].
-    pub dfa: Option<dense::DFA<Vec<u32>>>,
+    /// The DFA that matches this terminal.
+    pub dfa: dense::DFA<Vec<u32>>,
     /// This terminal's priority in lexing.
     pub priority: i32,
 }
@@ -120,7 +120,7 @@ impl<'a> Terminal<'a> {
         Terminal {
             name,
             pattern,
-            dfa: Some(dfa),
+            dfa,
             priority,
         }
     }

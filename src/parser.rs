@@ -37,8 +37,24 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// Return all the terminals that could come after this one, regardless of
+    /// the state the parser is in.
+    pub fn next_terminal(&'a self, terminal: &Terminal<'static>) -> Vec<Terminal<'static>> {
+        let states_that_accept_this_terminal: Vec<usize> = self
+            .action_table
+            .keys()
+            .filter(|key| key.1 == *terminal)
+            .map(|key| key.0.clone())
+            .collect();
+        let mut terminals_that_could_follow_this_one: Vec<Terminal<'static>> = Vec::new();
+        for state in states_that_accept_this_terminal {
+            terminals_that_could_follow_this_one.extend(self.follow(&vec![state]))
+        }
+        terminals_that_could_follow_this_one
+    }
+
     /// Return the terminals that the parser will accept in the current state.
-    pub fn follow(&'a self, state_stack: &Vec<usize>) -> Vec<Terminal<'a>> {
+    pub fn follow(&'a self, state_stack: &Vec<usize>) -> Vec<Terminal<'static>> {
         self.action_table
             .keys()
             .filter(|key| key.0 == *state_stack.last().unwrap())
