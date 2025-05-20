@@ -15,18 +15,15 @@ use std::collections::{HashMap, HashSet};
 
 use crate::types::*;
 
-/// A convenience terminal representing the empty string.
-const EPSILON: LazyCell<Terminal<'static>> = LazyCell::new(|| Terminal::new("epsilon", "", 0));
-
 /// A convenience terminal representing the end of the input.
-fn eof() -> Terminal<'static> {
+fn eof() -> Terminal {
     Terminal::new("$", "", 0)
 }
 
 /// Construct the first set of a given symbol.
 ///
 /// The algorithm comes from sec. 4.4.2 of the Dragon Book 2e, p. 221.
-fn symbol_first(symbol: &Symbol, grammar: &Grammar) -> HashSet<Terminal<'static>> {
+fn symbol_first(symbol: &Symbol, grammar: &Grammar) -> HashSet<Terminal> {
     match symbol {
         // If symbol is a terminal, then first(symbol) = {symbol}.
         Symbol::Terminal(terminal) => HashSet::from([terminal.clone()]),
@@ -66,8 +63,8 @@ fn symbol_first(symbol: &Symbol, grammar: &Grammar) -> HashSet<Terminal<'static>
 /// of FIRST(X2) if 𝜖 is in FIRST(X1); the non-𝜖 symbols of FIRST(X2) if 𝜖 is
 /// in FIRST(X1) and FIRST(X2) and so on. Finally add to FIRST(X1X2...Xn) if
 /// for all i 𝜖 is in FIRST(Xi).
-fn string_first(string: Vec<Symbol>, grammar: &Grammar) -> HashSet<Terminal<'static>> {
-    let mut first_set: HashSet<Terminal<'static>> = HashSet::new();
+fn string_first(string: Vec<Symbol>, grammar: &Grammar) -> HashSet<Terminal> {
+    let mut first_set: HashSet<Terminal> = HashSet::new();
     let string_length = string.len();
     for (idx, outer_symbol) in string.into_iter().enumerate() {
         let first_of_this_symbol = symbol_first(&outer_symbol, grammar);
@@ -111,7 +108,7 @@ fn closure(items: HashSet<Item>, grammar: &Grammar) -> HashSet<Item> {
                     // check).
                     continue;
                 }
-                if Symbol::NonTerminal(production.lhs) != item.production.rhs[item.dot] {
+                if Symbol::NonTerminal(production.lhs.clone()) != item.production.rhs[item.dot] {
                     // We only want the productions that begin with the symbol after the dot.
                     continue;
                 }
@@ -268,7 +265,7 @@ fn goto_table(grammar: &Grammar) -> GotoTable {
                         // Sometimes there just isn't a goto for a given (item_set, symbol) pair.
                         continue;
                     };
-                    goto_table.insert((state_id, *nonterminal), goto_state_id);
+                    goto_table.insert((state_id, nonterminal.clone()), goto_state_id);
                 }
             }
         }
@@ -301,12 +298,7 @@ fn find_state_id(item_set: &HashSet<Item>, item_sets: &[HashSet<Item>]) -> Resul
 /// Try to insert a rule into the action table, failing if there's already a rule there.
 ///
 /// Failure here indicates that the grammar isn't LR.
-fn checked_insert(
-    state_id: usize,
-    terminal: Terminal<'static>,
-    action: Action,
-    table: &mut ActionTable,
-) {
+fn checked_insert(state_id: usize, terminal: Terminal, action: Action, table: &mut ActionTable) {
     if table.contains_key(&(state_id, terminal.clone())) {
         // If any conflicting actions result from the above rules, the
         // algorithm fails to produce a parser because the grammar is not
@@ -330,34 +322,37 @@ mod tests {
     fn example_grammar() -> Grammar {
         Grammar {
             symbol_set: vec![
-                Symbol::NonTerminal("S'"),
-                Symbol::NonTerminal("S"),
-                Symbol::NonTerminal("C"),
+                Symbol::NonTerminal("S'".into()),
+                Symbol::NonTerminal("S".into()),
+                Symbol::NonTerminal("C".into()),
                 Symbol::Terminal(Terminal::new("c", "c", 0)),
                 Symbol::Terminal(Terminal::new("d", "d", 0)),
             ],
             start_production: Production {
-                lhs: "S'",
-                rhs: vec![Symbol::NonTerminal("S")],
+                lhs: "S'".into(),
+                rhs: vec![Symbol::NonTerminal("S".into())],
             },
             productions: vec![
                 Production {
-                    lhs: "S'",
-                    rhs: vec![Symbol::NonTerminal("S")],
+                    lhs: "S'".into(),
+                    rhs: vec![Symbol::NonTerminal("S".into())],
                 },
                 Production {
-                    lhs: "S",
-                    rhs: vec![Symbol::NonTerminal("C"), Symbol::NonTerminal("C")],
-                },
-                Production {
-                    lhs: "C",
+                    lhs: "S".into(),
                     rhs: vec![
-                        Symbol::Terminal(Terminal::new("c", "c", 0)),
-                        Symbol::NonTerminal("C"),
+                        Symbol::NonTerminal("C".into()),
+                        Symbol::NonTerminal("C".into()),
                     ],
                 },
                 Production {
-                    lhs: "C",
+                    lhs: "C".into(),
+                    rhs: vec![
+                        Symbol::Terminal(Terminal::new("c", "c", 0)),
+                        Symbol::NonTerminal("C".into()),
+                    ],
+                },
+                Production {
+                    lhs: "C".into(),
                     rhs: vec![Symbol::Terminal(Terminal::new("d", "d", 0))],
                 },
             ],

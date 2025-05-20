@@ -1,6 +1,6 @@
 // src/dfa.rs
 //! DFA helper functions. This module primarily exists to export
-//! `all_dfa_states`, which is sued to construct the mask store.
+//! `all_dfa_states`, which is used to construct the mask store.
 
 use crate::types::Terminal;
 use regex_automata::{
@@ -46,11 +46,11 @@ fn states(dfa: &dense::DFA<Vec<u32>>) -> Vec<StateID> {
 }
 
 /// Compute the union of all states of a list of terminals.
-pub fn all_dfa_states(terminals: &Vec<Terminal<'static>>) -> Vec<(Terminal<'static>, StateID)> {
+pub fn all_dfa_states(terminals: &Vec<Terminal>) -> Vec<(Terminal, StateID)> {
     let mut res = Vec::new();
     for terminal in terminals.iter() {
         let dfa = &terminal.dfa;
-        for state in states(&dfa) {
+        for state in states(dfa) {
             res.push((terminal.clone(), state));
         }
     }

@@ -19,12 +19,12 @@ use crate::types::*;
 /// easier by far to handle this struct as an immutable value and keep the
 /// stack as an argument that is passed in and out for each call.
 #[derive(Clone)]
-pub struct Parser<'a> {
+pub struct Parser {
     /// This parser's lexer.
     // It's not great to have this be part of the Parser, but the logic of
     // [Parser::parse] requires that the Parser know about the remainder, which
     // is most easily gotten using the [Lexer] directly.
-    pub lexer: Lexer<'a>,
+    pub lexer: Lexer,
     /// The action table. Each entry has an index and maps between a terminal and an action.
     pub action_table: ActionTable,
     /// The goto table. Each entry maps between a state index and a map between
@@ -36,25 +36,25 @@ pub struct Parser<'a> {
     pub token_index: usize,
 }
 
-impl<'a> Parser<'a> {
+impl Parser {
     /// Return all the terminals that could come after this one, regardless of
     /// the state the parser is in.
-    pub fn next_terminal(&'a self, terminal: &Terminal<'static>) -> Vec<Terminal<'static>> {
+    pub fn next_terminal(&self, terminal: &Terminal) -> Vec<Terminal> {
         let states_that_accept_this_terminal: Vec<usize> = self
             .action_table
             .keys()
             .filter(|key| key.1 == *terminal)
-            .map(|key| key.0.clone())
+            .map(|key| key.0)
             .collect();
-        let mut terminals_that_could_follow_this_one: Vec<Terminal<'static>> = Vec::new();
+        let mut terminals_that_could_follow_this_one: Vec<Terminal> = Vec::new();
         for state in states_that_accept_this_terminal {
-            terminals_that_could_follow_this_one.extend(self.follow(&vec![state]))
+            terminals_that_could_follow_this_one.extend(self.follow(&[state]))
         }
         terminals_that_could_follow_this_one
     }
 
     /// Return the terminals that the parser will accept in the current state.
-    pub fn follow(&'a self, state_stack: &Vec<usize>) -> Vec<Terminal<'static>> {
+    pub fn follow(&self, state_stack: &[usize]) -> Vec<Terminal> {
         self.action_table
             .keys()
             .filter(|key| key.0 == *state_stack.last().unwrap())
@@ -66,10 +66,10 @@ impl<'a> Parser<'a> {
     ///
     /// The inner loop of the LR parsing algorithm.
     pub fn next(
-        &'a self,
-        terminal: &Terminal<'a>,
+        &self,
+        terminal: &Terminal,
         state_stack: Vec<usize>,
-    ) -> Result<Vec<usize>, ParserError<'a>> {
+    ) -> Result<Vec<usize>, ParserError> {
         // This implementation is verbose because of the error handling
         // involved. Perhaps there's a way to make it more streamlined by
         // consolidating the error-managing boiler plate.
@@ -100,7 +100,7 @@ impl<'a> Parser<'a> {
 
                 Action::Reduce(rule) => {
                     // On a reduce, pop states according to the rule expansion length.
-                    let size = rule.result.len();
+                    let size = rule.rhs.len();
 
                     if size > 0 {
                         // Pop the appropriate number of states.
@@ -117,7 +117,7 @@ impl<'a> Parser<'a> {
                     };
 
                     // Get the next state for this state and nonterminal.
-                    let Some(next_state) = self.goto_table.get(&(*current_state, rule.source))
+                    let Some(next_state) = self.goto_table.get(&(*current_state, rule.lhs.clone()))
                     else {
                         return Err(ParserError::InvalidState(*current_state));
                     };
@@ -152,9 +152,9 @@ impl<'a> Parser<'a> {
     // from scratch each time. We'll see whether it's a problem in
     // benchmarking and come back for it if we need to.
     pub fn parse(
-        &'a self,
-        partial_output: &'a [u8],
-    ) -> Result<(HashSet<Vec<Terminal<'a>>>, Token<'a>), ParserError<'a>> {
+        &self,
+        partial_output: &[u8],
+    ) -> Result<(HashSet<Vec<Terminal>>, Token), ParserError> {
         let mut a0: Vec<Terminal> = Vec::new();
         let mut a1: Vec<Terminal> = Vec::new();
 
@@ -198,16 +198,16 @@ impl<'a> Parser<'a> {
                 accept_sequences.insert(vec![terminal]);
             }
         }
-        return Ok((accept_sequences, remainder));
+        Ok((accept_sequences, remainder))
     }
 }
 
 // Error types for the parser
 #[derive(Debug, Clone)]
-pub enum ParserError<'a> {
+pub enum ParserError {
     UnexpectedToken {
-        token: Token<'a>,
-        expected: Vec<Terminal<'a>>,
+        token: Token,
+        expected: Vec<Terminal>,
         state_index: usize,
     },
     UnexpectedEof,
@@ -219,13 +219,73 @@ pub enum ParserError<'a> {
     /// We got a terminal that doesn't work in this state.
     InvalidTerminal(
         /// Actual.
-        Terminal<'a>,
+        Terminal,
         /// Expected.
-        Vec<Terminal<'a>>,
+        Vec<Terminal>,
     ),
     InvalidToken,
     SyntaxError(String),
     ConfigError(String),
+}
+
+impl fmt::Display for ParserError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParserError::UnexpectedToken {
+                token,
+                expected,
+                state_index: _,
+            } => {
+                write!(
+                    f,
+                    "Unexpected token '{:?}' (type: {}) at line {}, column {}. Expected one of: {:?}",
+                    token.value,
+                    token.terminal.clone().unwrap().name,
+                    token.line,
+                    token.column,
+                    expected
+                )
+            }
+            ParserError::UnexpectedEof => {
+                write!(f, "Unexpected end of input")
+            }
+            ParserError::LexerError => {
+                write!(f, "Lexer error",)
+            }
+            ParserError::StackUnderflow => {
+                write!(f, "Parser stack underflow")
+            }
+            ParserError::EmptyStack => {
+                write!(f, "Parser stack is empty")
+            }
+            ParserError::InvalidState(msg) => {
+                write!(f, "Invalid parser state: {}", msg)
+            }
+            ParserError::InvalidAction(msg) => {
+                write!(f, "Invalid parser action: {}", msg)
+            }
+            ParserError::SyntaxError(msg) => {
+                write!(f, "Syntax error: {}", msg)
+            }
+            ParserError::ConfigError(msg) => {
+                write!(f, "Parser configuration error: {}", msg)
+            }
+            ParserError::InvalidTerminal(actual, _expected) => {
+                // FIXME: Implement fmt for Vec<Terminal.>
+                write!(
+                    f,
+                    "Unexpected terminal. Got: {}.",
+                    actual // , expected
+                )
+            }
+            ParserError::InvalidToken => {
+                write!(
+                    f,
+                    "Received a token without a terminal that wasn't the remainder."
+                )
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -236,43 +296,43 @@ mod tests {
 
     // Terminal definitions to be used throughout tests. Commented out ones may
     // come in handy in future tests but are commented to avoid dead code warnings.
-    fn word() -> Terminal<'static> {
+    fn word() -> Terminal {
         Terminal::new("WORD", r"[a-zA-Z_]\w*", 2)
     }
 
-    // fn string() -> Terminal<'static> {
+    // fn string() -> Terminal {
     //     Terminal::new("STRING", r#"("""[^"]*"""|'''[^']*''')"#, 2)
     // }
 
-    fn space() -> Terminal<'static> {
+    fn space() -> Terminal {
         Terminal::new("SPACE", "\\s+", 0)
     }
 
-    // fn equals() -> Terminal<'static> {
+    // fn equals() -> Terminal {
     //     Terminal::new("EQUALS", "=", 1)
     // }
 
-    // fn dot() -> Terminal<'static> {
+    // fn dot() -> Terminal {
     //     Terminal::new("DOT", r"\.", 1)
     // }
 
-    fn dec_number() -> Terminal<'static> {
+    fn dec_number() -> Terminal {
         Terminal::new("DEC_NUMBER", r"0|[1-9]\d*", 1)
     }
 
-    // fn oct_number() -> Terminal<'static> {
+    // fn oct_number() -> Terminal {
     //     Terminal::new("OCT_NUMBER", r"(?i)0o[0-7]+", 1)
     // }
 
-    // fn bin_number() -> Terminal<'static> {
+    // fn bin_number() -> Terminal {
     //     Terminal::new("BIN_NUMBER", r"(?i)0b[0-1]+", 1)
     // }
 
-    // fn hex_number() -> Terminal<'static> {
+    // fn hex_number() -> Terminal {
     //     Terminal::new("HEX_NUMBER", r"(?i)0x[\da-f]+", 1)
     // }
 
-    // fn float_number() -> Terminal<'static> {
+    // fn float_number() -> Terminal {
     //     Terminal::new(
     //         "FLOAT_NUMBER",
     //         r"((\d+\.\d*|\.\d+)(e[-+]?\d+)?|\d+(e[-+]?\d+))",
@@ -280,24 +340,24 @@ mod tests {
     //     )
     // }
 
-    // fn semicolon() -> Terminal<'static> {
+    // fn semicolon() -> Terminal {
     //     Terminal::new("SEMICOLON", ";", 0)
     // }
 
-    // fn newline() -> Terminal<'static> {
+    // fn newline() -> Terminal {
     //     Terminal::new("NEWLINE", r"\n", 1)
     // }
 
-    fn star() -> Terminal<'static> {
+    fn star() -> Terminal {
         Terminal::new("STAR", r"\*", 1)
     }
 
-    fn plus() -> Terminal<'static> {
+    fn plus() -> Terminal {
         Terminal::new("PLUS", r"\+", 1)
     }
 
     /// A convenience terminal representing the end of the input.
-    fn eof() -> Terminal<'static> {
+    fn eof() -> Terminal {
         Terminal::new("$", "", 0)
     }
 
@@ -305,40 +365,40 @@ mod tests {
     fn calc_rules() -> Vec<Production> {
         vec![
             Production {
-                source: "goal",
-                result: vec![Symbol::NonTerminal("sums"), Symbol::Terminal(eof())],
+                lhs: "goal".into(),
+                rhs: vec![Symbol::NonTerminal("sums".into()), Symbol::Terminal(eof())],
             },
             Production {
-                source: "sums",
-                result: vec![
-                    Symbol::NonTerminal("sums"),
+                lhs: "sums".into(),
+                rhs: vec![
+                    Symbol::NonTerminal("sums".into()),
                     Symbol::Terminal(plus()),
-                    Symbol::NonTerminal("products"),
+                    Symbol::NonTerminal("products".into()),
                 ],
             },
             Production {
-                source: "sums",
-                result: vec![Symbol::NonTerminal("products")],
+                lhs: "sums".into(),
+                rhs: vec![Symbol::NonTerminal("products".into())],
             },
             Production {
-                source: "products",
-                result: vec![
-                    Symbol::NonTerminal("products"),
+                lhs: "products".into(),
+                rhs: vec![
+                    Symbol::NonTerminal("products".into()),
                     Symbol::Terminal(star()),
-                    Symbol::NonTerminal("value"),
+                    Symbol::NonTerminal("value".into()),
                 ],
             },
             Production {
-                source: "products",
-                result: vec![Symbol::NonTerminal("value")],
+                lhs: "products".into(),
+                rhs: vec![Symbol::NonTerminal("value".into())],
             },
             Production {
-                source: "value",
-                result: vec![Symbol::Terminal(dec_number())],
+                lhs: "value".into(),
+                rhs: vec![Symbol::Terminal(dec_number())],
             },
             Production {
-                source: "value",
-                result: vec![Symbol::Terminal(word())],
+                lhs: "value".into(),
+                rhs: vec![Symbol::Terminal(word())],
             },
         ]
     }
@@ -376,16 +436,16 @@ mod tests {
 
     fn calc_goto_table() -> GotoTable {
         HashMap::from([
-            ((0, "sums"), 1),
-            ((0, "products"), 4),
-            ((0, "value"), 7),
-            ((2, "products"), 3),
-            ((2, "value"), 7),
-            ((5, "value"), 6),
+            ((0, "sums".into()), 1),
+            ((0, "products".into()), 4),
+            ((0, "value".into()), 7),
+            ((2, "products".into()), 3),
+            ((2, "value".into()), 7),
+            ((5, "value".into()), 6),
         ])
     }
 
-    fn calc_parser() -> Parser<'static> {
+    fn calc_parser() -> Parser {
         let action_table = calc_action_table();
         let goto_table = calc_goto_table();
 
@@ -449,7 +509,7 @@ mod tests {
         };
         assert_eq!(
             Token {
-                value: "1".as_bytes(),
+                value: "1".as_bytes().into(),
                 terminal: Some(dec_number()),
                 start_pos: 8,
                 end_pos: 9,
@@ -480,65 +540,5 @@ mod tests {
             ]),
             accept_sequences
         );
-    }
-}
-
-impl fmt::Display for ParserError<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParserError::UnexpectedToken {
-                token,
-                expected,
-                state_index: _,
-            } => {
-                write!(
-                    f,
-                    "Unexpected token '{:?}' (type: {}) at line {}, column {}. Expected one of: {:?}",
-                    token.value,
-                    token.terminal.clone().unwrap().name,
-                    token.line,
-                    token.column,
-                    expected
-                )
-            }
-            ParserError::UnexpectedEof => {
-                write!(f, "Unexpected end of input")
-            }
-            ParserError::LexerError => {
-                write!(f, "Lexer error",)
-            }
-            ParserError::StackUnderflow => {
-                write!(f, "Parser stack underflow")
-            }
-            ParserError::EmptyStack => {
-                write!(f, "Parser stack is empty")
-            }
-            ParserError::InvalidState(msg) => {
-                write!(f, "Invalid parser state: {}", msg)
-            }
-            ParserError::InvalidAction(msg) => {
-                write!(f, "Invalid parser action: {}", msg)
-            }
-            ParserError::SyntaxError(msg) => {
-                write!(f, "Syntax error: {}", msg)
-            }
-            ParserError::ConfigError(msg) => {
-                write!(f, "Parser configuration error: {}", msg)
-            }
-            ParserError::InvalidTerminal(actual, _expected) => {
-                // FIXME: Implement fmt for Vec<Terminal.>
-                write!(
-                    f,
-                    "Unexpected terminal. Got: {}.",
-                    actual // , expected
-                )
-            }
-            ParserError::InvalidToken => {
-                write!(
-                    f,
-                    "Received a token without a terminal that wasn't the remainder."
-                )
-            }
-        }
     }
 }

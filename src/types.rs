@@ -1,22 +1,28 @@
 // src/types.rs
 //! Core types used throughout SynCode.
 
-use regex_automata::dfa::dense;
+use regex_automata::{
+    Anchored,
+    dfa::{Automaton, dense},
+    util::primitives::StateID,
+    util::start::Config,
+};
 
 use std::cmp::PartialEq;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
+use std::{cell::LazyCell, sync::Arc};
 
 /// A lexical token, what the lexer breaks the input into.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Token<'a> {
+pub struct Token {
     /// The content of the token.
-    pub value: &'a [u8],
+    pub value: Arc<[u8]>,
     /// The type of terminal that this is in the grammar. None if this token
     /// couldn't be lexed, which can happen in the case that this is the
     /// unlexable remainder.
-    pub terminal: Option<Terminal<'a>>,
+    pub terminal: Option<Terminal>,
     /// Where in the input the token begins.
     pub start_pos: usize,
     /// Where in the input the token ends.
@@ -32,27 +38,26 @@ pub struct Token<'a> {
 }
 
 /// A terminal of the grammar.
-///
-/// FIXME: As a future optimization, put as many of these as possible behind
-/// `Rc`s or `Arc`s, because they are immutable and are often copied or moved
-/// around.
 #[derive(Clone)]
-pub struct Terminal<'a> {
+pub struct Terminal {
     /// The name of this terminal in the grammar.
-    pub name: &'a str,
+    pub name: Arc<str>,
     /// The regex describing this terminal.
-    pub pattern: &'a str,
+    pub pattern: Arc<str>,
     /// The DFA that matches this terminal.
     pub dfa: dense::DFA<Vec<u32>>,
     /// This terminal's priority in lexing.
     pub priority: i32,
 }
 
-/// An enumeration for symbols of the grammar, to act as a union type of terminals and nonterminals.
+/// A type alias for nonterminals of the grammar, purely for readability.
+pub type NonTerminal = Arc<str>;
+
+/// An enumeration for symbols of the grammar, to act as an algebraic union type of terminals and nonterminals.
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub enum Symbol {
-    Terminal(Terminal<'static>),
-    NonTerminal(NonTerminal<'static>),
+    Terminal(Terminal),
+    NonTerminal(NonTerminal),
 }
 
 /// A single production of the grammar.
@@ -63,9 +68,9 @@ pub enum Symbol {
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct Production {
     /// The left hand side of the production.
-    pub source: NonTerminal<'static>,
+    pub lhs: NonTerminal,
     /// The right hand side of the production.
-    pub result: Vec<Symbol>,
+    pub rhs: Vec<Symbol>,
 }
 
 /// A context-free grammar.
@@ -87,7 +92,7 @@ pub struct Item {
     /// The position of the dot in the result. Invariant: must be in [0, result.len()].
     pub dot: usize,
     /// The look ahead terminal.
-    pub lookahead: Terminal<'static>,
+    pub lookahead: Terminal,
 }
 
 /// Action enum for LR parsing.
@@ -104,29 +109,46 @@ pub enum Action {
 }
 
 /// An action table is a map from a (state_id, terminal) pair to an action.
-pub type ActionTable = HashMap<(usize, Terminal<'static>), Action>;
+pub type ActionTable = HashMap<(usize, Terminal), Action>;
 
 /// A goto table is a map from a (state_id, nonterminal) pair to a state_id.
-pub type GotoTable = HashMap<(usize, NonTerminal<'static>), usize>;
+pub type GotoTable = HashMap<(usize, NonTerminal), usize>;
 
 // Implementations.
-impl<'a> Terminal<'a> {
-    pub fn new(name: &'a str, pattern: &'a str, priority: i32) -> Self {
+impl Terminal {
+    /// Construct a new terminal.
+    pub fn new(name: &str, pattern: &str, priority: i32) -> Self {
         let Ok(dfa) = dense::DFA::new(pattern) else {
             panic!(
                 "While constructing the terminal {name}, could not build a DFA from the pattern {pattern}"
             )
         };
         Terminal {
-            name,
-            pattern,
+            name: name.into(),
+            pattern: pattern.into(),
             dfa,
             priority,
         }
     }
+
+    /// Get the initial state for this terminal's DFA.
+    pub fn start_state(&self) -> StateID {
+        let Ok(start_state) = self.dfa.start_state(&Config::new().anchored(Anchored::Yes)) else {
+            panic!();
+        };
+        start_state
+    }
+
+    /// Return the state that this terminal's DFA ends up in after consuming these bytes.
+    pub fn advance(&self, mut state: StateID, string: &[u8]) -> StateID {
+        for &b in string {
+            state = self.dfa.next_state(state, b);
+        }
+        state
+    }
 }
 
-impl fmt::Display for Terminal<'_> {
+impl fmt::Display for Terminal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -136,7 +158,7 @@ impl fmt::Display for Terminal<'_> {
     }
 }
 
-impl<'a> fmt::Debug for Terminal<'a> {
+impl fmt::Debug for Terminal {
     /// We don't care about the DFA for the purpose of printing.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Terminal")
@@ -147,7 +169,7 @@ impl<'a> fmt::Debug for Terminal<'a> {
     }
 }
 
-impl<'a> Hash for Terminal<'a> {
+impl Hash for Terminal {
     /// We don't care about the DFA for the purpose of hashing.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.name.hash(state);
@@ -156,24 +178,14 @@ impl<'a> Hash for Terminal<'a> {
     }
 }
 
-impl<'a> PartialEq for Terminal<'a> {
+impl PartialEq for Terminal {
     /// We don't care about the DFA for the purpose of equality comparison.
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.pattern == other.pattern && self.priority == other.priority
     }
 }
 
-impl<'a> Eq for Terminal<'a> {}
+impl Eq for Terminal {}
 
-/// A type alias for nonterminals of the grammar, purely for readability.
-pub type NonTerminal<'a> = &'a str;
-
-// impl Terminal<'static> {
-//     /// Consume a string starting from a state and return the state reached.
-//     pub fn advance(&self, state: StateID, input: &[u8]) -> StateID {
-//         for &b in input {
-//             state = self.dfa.next_state(state, b);
-//         }
-//         state
-//     }
-// }
+/// A convenience terminal representing the empty string.
+pub const EPSILON: LazyCell<Terminal> = LazyCell::new(|| Terminal::new("epsilon", "", 0));

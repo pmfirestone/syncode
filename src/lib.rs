@@ -9,7 +9,6 @@ pub mod mask;
 pub mod parser;
 pub mod table;
 pub mod types;
-// mod python_bindings;
 // mod util;
 
 // use pyo3::prelude::*;

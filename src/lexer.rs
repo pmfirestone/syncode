@@ -5,6 +5,7 @@
 use regex_automata::dfa::{Automaton, StartKind, dense};
 use regex_automata::{Anchored, util::start};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::types::{Terminal, Token};
 
@@ -29,38 +30,38 @@ pub enum LexError {
 
 /// Hold DFAs for the terminals in the grammar.
 #[derive(Clone)]
-struct Scanner<'a> {
+struct Scanner {
     /// The DFA for matching patterns.
     dfa: dense::DFA<Vec<u32>>,
     /// Maps DFA match pattern to the TerminalDef it represents.
-    index_to_type: HashMap<usize, Terminal<'a>>,
+    index_to_type: HashMap<usize, Terminal>,
     /// Maps token type name to whether it can contain newlines.
-    _newline_types: HashSet<&'a str>,
+    _newline_types: HashSet<Arc<str>>,
     /// Terminal definitions for reference.
-    _terminals: Vec<Terminal<'a>>,
+    _terminals: Vec<Terminal>,
     /// All allowed types.
-    pub _allowed_types: HashSet<&'a str>,
+    pub _allowed_types: HashSet<Arc<str>>,
 }
 
-impl<'a> Scanner<'a> {
-    pub fn new(terminals: Vec<Terminal<'a>>) -> Result<Self, LexError> {
+impl Scanner {
+    pub fn new(terminals: Vec<Terminal>) -> Result<Self, LexError> {
         let mut newline_types = HashSet::new();
         let mut allowed_types = HashSet::with_capacity(terminals.len());
         let mut index_to_type = HashMap::with_capacity(terminals.len());
 
         // Determine which patterns might contain newlines
         for terminal in &terminals {
-            let pattern_str = terminal.pattern;
+            let pattern_str = &terminal.pattern;
             if pattern_str.contains("\\n")
                 || pattern_str.contains("\n")
                 || pattern_str.contains("\\s")
                 || pattern_str.contains("[^")
                 || (pattern_str.contains(".") && pattern_str.contains("(?s"))
             {
-                newline_types.insert(terminal.name);
+                newline_types.insert(terminal.name.clone());
             }
 
-            allowed_types.insert(terminal.name);
+            allowed_types.insert(terminal.name.clone());
         }
 
         // Sort terminals by priority (highest first)
@@ -81,7 +82,7 @@ impl<'a> Scanner<'a> {
         // Process each terminal
         for (i, terminal) in sorted_terminals.iter().enumerate() {
             index_to_type.insert(i, terminal.clone());
-            patterns.push(terminal.pattern);
+            patterns.push(terminal.pattern.clone());
         }
 
         // Build the DFA
@@ -107,7 +108,7 @@ impl<'a> Scanner<'a> {
     /// return it along with the type of terminal that it is.
     ///
     /// Look for the longest possible match.
-    pub fn match_token(&self, text: &'a [u8], pos: usize) -> Option<(&'a [u8], &Terminal)> {
+    pub fn match_token(&self, text: Box<[u8]>, pos: usize) -> Option<(Box<[u8]>, &Terminal)> {
         if pos >= text.len() {
             return None;
         }
@@ -155,7 +156,7 @@ impl<'a> Scanner<'a> {
         // Return the best match found as string slices
         if let Some((pattern_idx, match_len)) = best_match {
             if let Some(terminal) = self.index_to_type.get(&pattern_idx) {
-                return Some((&rest[..match_len], terminal));
+                return Some((rest[..match_len].into(), terminal));
             }
         }
 
@@ -165,18 +166,18 @@ impl<'a> Scanner<'a> {
 
 /// A lexer.
 #[derive(Clone)]
-pub struct Lexer<'a> {
+pub struct Lexer {
     /// The machinery for the DFAs.
-    scanner: Scanner<'a>,
+    scanner: Scanner,
     /// The terminals this lexer recognizes.
-    pub terminals: Vec<Terminal<'a>>,
+    pub terminals: Vec<Terminal>,
     /// The terminals that this lexer ignores.
-    pub ignore_types: HashSet<Terminal<'a>>,
+    pub ignore_types: HashSet<Terminal>,
     /// The terminals that contain newlines.
-    pub newline_types: HashSet<Terminal<'a>>,
+    pub newline_types: HashSet<Terminal>,
 }
 
-impl<'a> Lexer<'a> {
+impl Lexer {
     /// Construct a new lexer that recognizes the given `terminals` and ignores
     /// the `ignore_types`.
     ///
@@ -184,11 +185,11 @@ impl<'a> Lexer<'a> {
     /// otherwise they won't be recognized at all. This is perhaps suboptimal
     /// API design.
     pub fn new(
-        terminals: Vec<Terminal<'a>>,
-        ignore_types: HashSet<Terminal<'a>>,
+        terminals: Vec<Terminal>,
+        ignore_types: HashSet<Terminal>,
     ) -> Result<Self, LexError> {
         // Determine which patterns might contain newlines
-        let mut newline_types: HashSet<Terminal<'a>> = HashSet::new();
+        let mut newline_types: HashSet<Terminal> = HashSet::new();
         for terminal in &terminals {
             if terminal.pattern.contains("\\n")
                 || terminal.pattern.contains("\n")
@@ -223,15 +224,15 @@ impl<'a> Lexer<'a> {
     // pair, and its caller in turn unpacks that pair. This keeps the notation
     // in the code similar to that in the paper.
     fn next_token(
-        &'a self,
-        text: &'a [u8],
+        &self,
+        text: &[u8],
         mut pos: usize,
         mut line: usize,
         mut column: usize,
-    ) -> Result<(Token<'a>, bool), LexError> {
+    ) -> Result<(Token, bool), LexError> {
         loop {
             // Try to match next token
-            if let Some((value, terminal)) = self.scanner.match_token(text, pos) {
+            if let Some((value, terminal)) = self.scanner.match_token(text.into(), pos) {
                 let ignored = self.ignore_types.contains(terminal);
 
                 // If this token is ignored, update position and continue the loop
@@ -241,8 +242,8 @@ impl<'a> Lexer<'a> {
                     // Update line and column information
                     if contains_newline {
                         // Calculate new line and column for tokens with newlines
-                        for b in value {
-                            if *b == b'\n' {
+                        for &b in &value {
+                            if b == b'\n' {
                                 line += 1;
                                 column = 1;
                             } else {
@@ -271,8 +272,8 @@ impl<'a> Lexer<'a> {
                     let mut current_line = line;
                     let mut current_column = column;
 
-                    for b in value {
-                        if *b == b'\n' {
+                    for &b in &value {
+                        if b == b'\n' {
                             current_line += 1;
                             current_column = 1;
                         } else {
@@ -288,7 +289,7 @@ impl<'a> Lexer<'a> {
 
                 return Ok((
                     Token {
-                        value,
+                        value: value.into(),
                         terminal: Some(terminal.clone()),
                         start_pos,
                         end_pos,
@@ -311,7 +312,7 @@ impl<'a> Lexer<'a> {
                 let value = &text[pos..];
                 return Ok((
                     Token {
-                        value,
+                        value: value.into(),
                         terminal: None,
                         start_pos: pos,
                         end_pos: text.len(),
@@ -333,7 +334,7 @@ impl<'a> Lexer<'a> {
     /// token, in the case where the entire input could be lexed, or the
     /// unlexable suffix, in the case where the end of the input could not be
     /// lexed.
-    pub fn lex(&'a self, text: &'a [u8]) -> Result<(Vec<Token<'a>>, Token<'a>), LexError> {
+    pub fn lex(&self, text: &[u8]) -> Result<(Vec<Token>, Token), LexError> {
         // Pre-allocate a reasonably-sized vector based on estimated token density
         let estimated_token_count = text.len() / 8;
         let mut tokens = Vec::with_capacity(estimated_token_count);
@@ -391,43 +392,43 @@ mod tests {
     use std::collections::HashSet;
 
     // Terminal definitions to be used throughout tests.
-    fn word() -> Terminal<'static> {
+    fn word() -> Terminal {
         Terminal::new("WORD", r"[a-zA-Z_]\w*", 2)
     }
 
-    fn string() -> Terminal<'static> {
+    fn string() -> Terminal {
         Terminal::new("STRING", r#"("""[^"]*"""|'''[^']*''')"#, 2)
     }
 
-    fn space() -> Terminal<'static> {
+    fn space() -> Terminal {
         Terminal::new("SPACE", "\\s+", 0)
     }
 
-    fn equals() -> Terminal<'static> {
+    fn equals() -> Terminal {
         Terminal::new("EQUALS", "=", 1)
     }
 
-    fn dot() -> Terminal<'static> {
+    fn dot() -> Terminal {
         Terminal::new("DOT", r"\.", 1)
     }
 
-    fn dec_number() -> Terminal<'static> {
+    fn dec_number() -> Terminal {
         Terminal::new("DEC_NUMBER", r"0|[1-9]\d*", 1)
     }
 
-    fn oct_number() -> Terminal<'static> {
+    fn oct_number() -> Terminal {
         Terminal::new("OCT_NUMBER", r"(?i)0o[0-7]+", 1)
     }
 
-    fn bin_number() -> Terminal<'static> {
+    fn bin_number() -> Terminal {
         Terminal::new("BIN_NUMBER", r"(?i)0b[0-1]+", 1)
     }
 
-    fn hex_number() -> Terminal<'static> {
+    fn hex_number() -> Terminal {
         Terminal::new("HEX_NUMBER", r"(?i)0x[\da-f]+", 1)
     }
 
-    fn float_number() -> Terminal<'static> {
+    fn float_number() -> Terminal {
         Terminal::new(
             "FLOAT_NUMBER",
             r"((\d+\.\d*|\.\d+)(e[-+]?\d+)?|\d+(e[-+]?\d+))",
@@ -435,19 +436,19 @@ mod tests {
         )
     }
 
-    fn semicolon() -> Terminal<'static> {
+    fn semicolon() -> Terminal {
         Terminal::new("SEMICOLON", ";", 0)
     }
 
-    fn newline() -> Terminal<'static> {
+    fn newline() -> Terminal {
         Terminal::new("NEWLINE", r"\n", 1)
     }
 
-    fn star() -> Terminal<'static> {
+    fn star() -> Terminal {
         Terminal::new("STAR", r"\*", 1)
     }
 
-    fn plus() -> Terminal<'static> {
+    fn plus() -> Terminal {
         Terminal::new("PLUS", r"\+", 1)
     }
 
@@ -484,10 +485,10 @@ mod tests {
         // (plus one EOF marker)
         assert_eq!(tokens.0.len(), 2);
 
-        assert_eq!(tokens.0[0].value, "hello".as_bytes());
+        assert_eq!(&*tokens.0[0].value, "hello".as_bytes());
         assert_eq!(tokens.0[0].terminal, Some(word()));
 
-        assert_eq!(tokens.0[1].value, "world".as_bytes());
+        assert_eq!(&*tokens.0[1].value, "world".as_bytes());
         assert_eq!(tokens.0[1].terminal, Some(word()));
 
         // The remainder should be the last token in the input.
@@ -510,7 +511,7 @@ mod tests {
         };
         assert_eq!(
             Token {
-                value: "1".as_bytes(),
+                value: "1".as_bytes().into(),
                 terminal: Some(dec_number()),
                 start_pos: 8,
                 end_pos: 9,
@@ -651,7 +652,7 @@ mod tests {
             let token_info: Vec<(Terminal, &[u8])> = tokens
                 .0
                 .iter()
-                .map(|token| (token.terminal.clone().unwrap(), token.value))
+                .map(|token| (token.terminal.clone().unwrap(), &*token.value))
                 .collect();
 
             assert_eq!(token_info, expected_tokens, "Failed for text: {}", text);
@@ -681,7 +682,7 @@ mod tests {
         assert_eq!(
             tokens[0],
             Token {
-                value: "123".as_bytes(),
+                value: "123".as_bytes().into(),
                 terminal: Some(dec_number()),
                 start_pos: 0,
                 end_pos: 3,
@@ -695,7 +696,7 @@ mod tests {
         assert_eq!(
             tokens[1],
             Token {
-                value: "ret".as_bytes(),
+                value: "ret".as_bytes().into(),
                 terminal: Some(word()),
                 start_pos: 4,
                 end_pos: 7,
@@ -730,7 +731,7 @@ mod tests {
         assert_eq!(
             tokens[0],
             Token {
-                value: "return".as_bytes(),
+                value: "return".as_bytes().into(),
                 terminal: Some(word()),
                 start_pos: 0,
                 end_pos: 6,
@@ -744,7 +745,7 @@ mod tests {
         assert_eq!(
             remainder,
             Token {
-                value: "0x".as_bytes(),
+                value: "0x".as_bytes().into(),
                 terminal: None,
                 start_pos: 7,
                 end_pos: 9,
@@ -776,15 +777,15 @@ mod tests {
 
         // First word should be on line 1
         assert_eq!(tokens.0[0].line, 1);
-        assert_eq!(tokens.0[0].value, "first".as_bytes());
+        assert_eq!(tokens.0[0].value, "first".as_bytes().into());
 
         // After first newline, we should be on line 2
         assert_eq!(tokens.0[2].line, 2);
-        assert_eq!(tokens.0[2].value, "second".as_bytes());
+        assert_eq!(tokens.0[2].value, "second".as_bytes().into());
 
         // After second newline, we should be on line 3
         assert_eq!(tokens.0[4].line, 3);
-        assert_eq!(tokens.0[4].value, "third".as_bytes());
+        assert_eq!(tokens.0[4].value, "third".as_bytes().into());
 
         // The remainder should be the last token seen.
         assert_eq!(tokens.1, tokens.0[4]);
