@@ -71,6 +71,8 @@ pub struct Production {
     pub lhs: NonTerminal,
     /// The right hand side of the production.
     pub rhs: Vec<Symbol>,
+    /// The priority of this production. Used to resolve conflicts when constructing the table.
+    pub priority: i32,
 }
 
 /// A context-free grammar.
@@ -78,6 +80,8 @@ pub struct Production {
 pub struct Grammar {
     /// The set of symbols that are active in this grammar.
     pub symbol_set: Vec<Symbol>,
+    /// The set of terminals that are in this grammar.
+    pub terminals: Vec<Terminal>,
     /// The first production; this one is the augmented one added to the grammar.
     pub start_production: Production,
     /// The productions that make up this grammar, including the start_production.
