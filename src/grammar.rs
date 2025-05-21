@@ -1,31 +1,23 @@
 // src/grammar.rs
-//! Parse [GBNF](https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md)
-//! files and turn them into `[crate::types::Grammar]` objects for the
-//! `[crate::table]` module to build an LR parser out of.
+//! Parse [Lark's EBNF](https://lark-parser.readthedocs.io/en/stable/grammar.html)
+//! and turn it into a `[crate::types::Grammar]` object.
 //!
-//! This module implements a recursive-descent parser for GBNF and is
-//! essentially a translation into rust of the equivalent component of XGrammar
-//! (grammar_parser.cc). GBNF, unfortunately, lacks a formal specification, so
-//! this parser is something of a folk theorem whose correctness remains to be shown.
+//! The comments of this file make liberal use of text from Lark's grammar and
+//! documentation, without explicit attribution.
 //!
-//! GBNF is also strange in that it doesn't actually have regex-based lexical
-//! terminals. This makes it somewhat different from other grammar description
-//! langauges, where the lexer is separately defined with its own regexes. It
-//! may be that this breaks the assumptions of syncode, or not. In principle,
-//! one doesn't need the regexes apart from the grammar, since the grammar
-//! itself suffices to define the terminals in question. The primary change
-//! would be that the lexical tokens will be smaller and the parse tree
-//! larger. For example, if an identifier is defined as
-//! /[a-zA-Z_][a-zA-Z0-9_]*/, the first character and the possible continuation
-//! will be clustered into a single terminal by the lexer. If, instead, an
-//! identifier is a production (identifier ::= [a-zA-Z_] [a-zA-Z0-9_]*, the
-//! lexer will return the first character then the remaining characters as two
-//! separate terminals, and the parser will be responsible for reducing them to
-//! the identifier nonterminal. At a first approximation, this should not
-//! affect syncode's correctness, since it does not change the inputs that will
-//! or won't be recognized by the grammar; in practice, though, the algorithm
-//! will examine less of each token, potentially reducing correctness.
+//! FIXMES:
+//! 
+//! 1. There are `consume_space()`s throughout the module sort of at
+//! random. Should this behavior be integrated directly into the consume
+//! procedure, so that we never have to explicitly worry about it?
+//! 
+//! 2. Is it ideal to keep the input string and a current position index
+//! seperately in the module's state, rather than just consuming characters
+//! from an iterator? The position index allows for backtracking, but it's not
+//! clear that we ever need that.
 use crate::types::*;
+use regex::Regex;
+use regex_automata::util::lazy::Lazy;
 
 /// Track the current state of parsing.
 ///
@@ -35,11 +27,9 @@ struct EBNFParser {
     /// The current position in the input.
     cur_pos: usize,
     /// The name of the starting rule in the grammar.
-    starting_rule_name: &'static str,
-    /// The gbnf grammar that we are currently parsing. This is a String to
-    /// support the presence of non-ascii characters (i.e. multi-byte utf-8
-    /// characters) in the grammar specification.
-    input_string: String,
+    starting_rule_name: Box<str>,
+    /// The ebnf grammar that we are currently parsing.
+    input_string: Box<str>,
     /// The grammar that we will eventually return.
     grammar: Grammar,
     /// The current line.
@@ -48,316 +38,337 @@ struct EBNFParser {
     cur_column: usize,
     /// The name of the rule we are currently parsing (i.e. the nonterminal on
     /// the production's left-hand side).
-    cur_rule_name: &'static str,
-    /// Whether or not we are currently inside parentheses.
+    cur_rule_name: Box<str>,
+    /// The name of the token we are currently parsing. "" if none.
+    cur_token_name: Box<str>,
+    /// The priority of the rule or token we are currently parsing. Defaults to 0.
+    cur_priority: i32,
+    /// Whether or not we are currently inside parentheses. "" if none.
     in_parentheses: bool,
 }
 
+/// The terminals of the grammar description language.
+
+const STRING: &str = r#"\".*?(?<!\)(\\)*?\"i?"#;
+const REGEXP: &str = r"/(?!/)(\/|\\|[^/])*?/[imslux]*";
+const NL: &str = r"(\r?\n)+\s*";
+
+// Anchor these to the beginning of the string, because we will be using the regex
+// to pop the terminal off the beginning of the input.
+const OP: &str = r"^[+*]|[?](?![a-z])";
+const OP_RE: Lazy<Regex> = Lazy::new(|| Regex::new(OP).unwrap());
+const VBAR: &str = r"^((\r?\n)+\s*)?\|";
+const VBAR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(VBAR).unwrap());
+const NUMBER: &str = r"^(+|-)?[0-9]+";
+const NUMBER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(NUMBER).unwrap());
+const RULE: &str = r"^!?[_?]?[a-z][_a-z0-9]*";
+const RULE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(RULE).unwrap());
+const TOKEN: &str = r"^_?[A-Z][_A-Z0-9]*";
+const TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(TOKEN).unwrap());
+
 impl EBNFParser {
-    fn new(input_string: String, starting_rule_name: &'static str) -> Self {
+    fn new(input_string: &str, starting_rule_name: &str) -> Self {
         EBNFParser {
             cur_pos: 0,
-            starting_rule_name,
-            input_string,
+            starting_rule_name: starting_rule_name.into(),
+            input_string: input_string.into(),
             grammar: Grammar {
                 productions: vec![],
+                terminals: vec![],
                 symbol_set: vec![],
                 start_production: Production {
                     lhs: "".into(),
                     rhs: vec![],
+                    priority: 0,
                 },
             },
             cur_line: 1,
             cur_column: 1,
-            cur_rule_name: "",
+            cur_rule_name: "".into(),
+            cur_token_name: "".into(),
+            cur_priority: 0,
             in_parentheses: false,
         }
     }
-    /// Parse ebnf_string into a Grammar.
+    /// Parse inout_string into a Grammar.
     ///
     /// The grammar will be "augmented", which means that the start rule will
     /// always be a production whose right-hand side is a single non-terminal. This
     /// is necessary for the algorithm in `[crate::table]`, which assumes this
     /// characteristic.
     fn parse(mut self) -> Grammar {
-        // Just to be sure that nothing silly's happened.
-        self.cur_pos = 0;
+        // Preprocessing.
+        self.expand_templates();
+        self.expand_imports();
+        self.expand_overrides();
+        self.expand_extends();
 
-        self.consume_space(true);
-        while self.cur_pos < self.input_string.len() {
-            // Throw an error when there are multiple lookahead assertions.
-            if self.peek(0) == '(' && self.peek(1) == '=' {
-                self.report_parse_error("Unexpected lookahead assertion");
+        while self.cur_pos <= self.input_string.len() {
+            // Advance to next non-whitespace (or comment) in the input.
+            self.consume_space();
+            // item: rule | token | statement
+            if RULE_RE.is_match_at(&self.input_string, self.cur_pos) {
+                self.parse_rule();
+            } else if TOKEN_RE.is_match_at(&self.input_string, self.cur_pos) {
+                self.parse_token();
+            } else if self.input_string[self.cur_pos..self.cur_pos + 1] == *"%" {
+                // FIXME: terrible kludge to check whether the next character is "%".
+                self.parse_statement();
+            } else {
+                self.report_parse_error("Invalid item.");
             }
-            let new_rules = self.parse_rule();
         }
-
         self.grammar
-    }
-
-    fn parse_identifier(&mut self, accept_empty: bool) -> &str {
-        let start = self.cur_pos;
-        let mut first_char = true;
-        while self.cur_pos <= self.input_string.len() && self.is_name_char(self.peek(0), first_char)
-        {
-            self.consume(1);
-            first_char = false;
-        }
-        if start == self.cur_pos && !accept_empty {
-            self.report_parse_error("Expect rule name");
-        }
-        return &self.input_string[start..self.cur_pos];
-    }
-
-    /// Parse a character class.
-    ///
-    /// This procedure will in fact always return a Terminal. We get this for
-    /// cheap by just passing the character class directly to the regex
-    /// crate. Lacking a better option in GBNF, where terminals are defined
-    /// indirectly within the right-hand sides of productions, rather than
-    /// explicitly as part of a lexer specification, just make the name of the
-    /// character class terminal the regex itself.
-    fn parse_character_class(&mut self) -> Symbol {
-        // We have to scan forward until we get to the end of the part that's
-        // the character class, accounting for the optional repeat operators we
-        // might find. We want to forward all parsing of these classes to the
-        // regex library; all we do here is extract the part of the string we
-        // want.
-        let mut chars: String = "".to_string();
-        while self.cur_pos <= self.input_string.len()
-	    // We don't want to terminate for escaped ']'.
-            && !(self.peek(0) == '\\' && self.peek(1) == ']')
-	    && self.peek(1) != ']'
-        {
-            chars.push(self.peek(0));
-            self.consume(1);
-        }
-        chars.push(']');
-        // A sanity check to make me feel better.
-        assert!(
-            chars.chars().nth(0).unwrap() == '[',
-            "Wrong opening to character class string: {}",
-            chars.chars().nth(0).unwrap()
-        );
-        assert!(
-            chars.chars().last().unwrap() == ']',
-            "Wrong ending to character class string: {}",
-            chars.chars().last().unwrap()
-        );
-        // We've gotten to the end of the character class proper, but there could be repeat markers.
-        match self.peek(0) {
-            '*' | '+' | '?' => {
-                chars.push(self.peek(0));
-                self.consume(1)
-            }
-            '{' => {
-		// Consume to the closing brace.
-		while self.cur_pos <= self.input_string.len() && self.peek(0) != '}' {
-		    chars.push(self.peek(0));
-		    self.consume(1);
-		}
-		chars.push('}');
-		self.consume(1);
-	    }
-            _ => { /* Do nothing.*/ }
-        }
-
-        Symbol::Terminal(Terminal::new(&chars, &chars, 0))
-    }
-
-    /// Parse a string in the input.
-    ///
-    /// In GBNF, a string is always a terminal of the grammar, so this
-    /// procedure will always return a terminal. In the absence of another way
-    /// to determine the name of the terminal, we will simply use the string
-    /// itself as its own name.
-    ///
-    /// We can cheese this by relying on Rust's string abstractions; we don't
-    /// have to juggle the utf-8 ourselves, unlike XGrammar.
-    fn parse_string(&mut self) -> Symbol {
-        let mut chars: String = "".into();
-        while self.cur_pos <= self.input_string.len() && self.peek(1) != '"' {
-            chars.push(self.peek(0));
-            self.consume(1);
-        }
-        Symbol::Terminal(Terminal::new(&chars, &chars, 0))
-    }
-
-    /// Determine whether this character could be part of an identifier.
-    fn is_name_char(&mut self, c: char, first_char: bool) -> bool {
-        return c == '_'
-            || c == '-'
-            || c == '.'
-            || c.is_ascii_alphabetic()
-            || (!first_char && c.is_ascii_digit());
-    }
-
-    /// Parse a reference to another rule on the right-hand side of a rule.
-    ///
-    /// Since a nonterminal is just its own name, this procedure always returns
-    /// a nonterminal.
-    fn parse_rule_ref(&mut self) -> Symbol {
-        let rule_name = self.parse_identifier(false);
-        Symbol::NonTerminal(rule_name.into())
-    }
-
-    /// Parse a single element of the right-hand side of a production.
-    fn parse_element(&mut self) -> Symbol {
-        match self.peek(0) {
-            '(' => {
-                self.consume(1);
-                self.consume_space(true);
-                if self.peek(0) == ')' {
-                    // Special case: ( ).
-                    self.consume(1);
-                    return Symbol::Terminal(*EPSILON);
-                }
-                let prev_in_parentheses = self.in_parentheses;
-                self.in_parentheses = true;
-                let choices = self.parse_choices();
-                self.consume_space(true);
-                if self.peek(0) != ')' {
-                    self.report_parse_error("Expect )");
-                }
-                self.consume(1);
-                self.in_parentheses = prev_in_parentheses;
-                return choices;
-            }
-            '[' => {
-                // Let the parse_character_class procedure handle the opening
-                // and closing square braces.
-                let element = self.parse_character_class();
-                // Note that parsing the character class also consumes whatever
-                // quantifier follows the character class, if there is any. We
-                // do not consume any farther in the input at this point.
-                return element;
-            }
-            '\"' => {
-                self.consume(1);
-                return self.parse_string();
-            }
-            _ => {
-                if self.is_name_char(self.peek(0), true) {
-                    return self.parse_rule_ref();
-                }
-                self.report_parse_error("Expect element, but got character: {self.peek(0)}");
-                // Make the compiler happy, even though the previous call never returns.
-                return Symbol::NonTerminal("".into());
-            }
-        }
-    }
-
-    /// Unpack repeating rules into a bunch of individual rules. This is distinct from the ranges that follow character classes 
-    fn handle_repetition_range(&mut self, element: Symbol, lower: usize, upper: usize) {
-	
-    }
-
-    fn handle_star_quantifier(&mut self, element: Symbol) -> Symbol {}
-
-    fn handle_plus_quantifier(&mut self, element: Symbol) -> Symbol {}
-
-    fn handle_question_quantifier(&mut self, element: Symbol) -> Symbol {}
-
-    fn parse_element_with_quantifier(&mut self) -> Symbol {
-        let element: Symbol = self.parse_element();
-        self.consume_space(self.in_parentheses);
-        if self.peek(0) != '*' && self.peek(0) != '+' && self.peek(0) != '?' && self.peek(0) != '{'
-        {
-            // Not a quantified element.
-            return element;
-        }
-
-        // Handle repetition range.
-        if self.peek(0) == '{' {
-            let (lower, upper) = self.parse_repetition_range();
-            return self.handle_repetition_range(element, lower, upper);
-        }
-
-        // Get the quantifier to parse and advance.
-        let quantifier = self.peek(0);
-        self.consume(1);
-
-        match quantifier {
-            '*' => return self.handle_star_quantifier(element),
-            '+' => return self.handle_plus_quantifier(element),
-            '?' => return self.handle_question_quantifier(element),
-            _ => {
-                self.report_parse_error("Unreachable. Failed to match any quantifier.");
-                // Make the compiler happy, even though the the previous line
-                // will panic, and anyway this branch can't be reached.
-                return element;
-            }
-        }
-    }
-
-    /// Parse a sequence of elements in a single choice on the right-hand side of a production.
-    fn parse_sequence(&mut self) -> Vec<Symbol> {
-        let mut elements: Vec<Symbol> = Vec::new();
-        loop {
-            elements.push(self.parse_element_with_quantifier());
-            if !(self.cur_pos < self.input_string.len()
-                && self.peek(0) != '|'
-                && self.peek(0) != ')'
-                && self.peek(0) != '\n'
-                && self.peek(0) != '\r')
-            {
-                break;
-            }
-        }
-        elements
-    }
-
-    /// Parse the choices on the right hand side of a rule, returning a vector
-    /// of each possible result.
-    fn parse_choices(&mut self) -> Vec<Vec<Symbol>> {
-        let mut choices: Vec<Vec<Symbol>> = Vec::new();
-        choices.push(self.parse_sequence());
-        self.consume_space(true);
-        while self.peek(0) == '|' {
-            self.consume(1);
-            self.consume_space(true);
-            choices.push(self.parse_sequence());
-            self.consume_space(true);
-        }
-        choices
     }
 
     /// Parse a rule.
     ///
-    /// The basic format of a production rule in GBNF is `nonterminal ::=
-    /// sequence...`, where sequence is some terminals and nonterminals.
-    fn parse_rule(&mut self) -> Vec<Production> {
-        let rule_name = self.parse_identifier(false);
-        self.cur_rule_name = rule_name;
-        self.consume_space(true);
-        if self.peek(0) != ':' || self.peek(1) != ':' || self.peek(2) != '=' {
-            self.report_parse_error("Expect ::=");
+    /// `rule: RULE priority? ":" expansions`
+    ///
+    /// Note that the params that are present in the syntax have already been
+    /// expanded by the time this procedure is called.
+    fn parse_rule(&mut self) {
+        let rule_match = RULE_RE.find_at(&self.input_string, self.cur_pos).unwrap();
+
+        self.cur_rule_name = rule_match.as_str().into();
+        self.consume(rule_match.len());
+
+        self.consume_space();
+
+        if self.peek(0) == '.' {
+            self.parse_priority();
         }
-        self.consume(3);
-        self.consume_space(true);
-        // Here we diverge somewhat from XGrammar, since they do some business
-        // with tagged productions at the root rule that we don't. (This is, in
-        // fact, not documented in their documentation as far as I can tell,
-        // but the relevant term to search in the source code is TagDispatch).
 
-        // We also diverge in that they insert the rules directly into their
-        // grammar builder, whereas we put them into the Grammar struct, which
-        // will in turn be processed by the table module to make the tables the
-        // parser module uses.
-        let right_hand_sides: Vec<Vec<Symbol>> = self.parse_choices();
-        self.consume_space(true);
-        // We also don't (yet) support lookaheads in our grammars, but this is
-        // the point in XGrammar where they figure out the lookaheads in the
-        // rule, if there are any.
+        if self.peek(0) == ':' {
+            self.consume(1);
+        } else {
+            self.report_parse_error("Expected ':'.");
+        }
 
-        return right_hand_sides
-            .into_iter()
-            .map(|rhs| Production {
-                lhs: rule_name.into(),
-                rhs,
-            })
-            .collect();
+        self.parse_expansions();
+
+        // We are no longer parsing a rule.
+        self.cur_rule_name = "".into();
+        self.cur_priority = 0;
     }
+
+    /// Parse a token.
+    ///
+    /// `token: TOKEN priority? ":" expansions`
+    ///
+    /// Note that the params that are present in the syntax have already been
+    /// expanded by the time this procedure is called.
+    fn parse_token(&mut self) {
+        let token_match = TOKEN_RE.find_at(&self.input_string, self.cur_pos).unwrap();
+
+        self.cur_token_name = token_match.as_str().into();
+        self.consume(token_match.len());
+
+        if self.peek(0) == '.' {
+            self.parse_priority();
+        }
+
+        if self.peek(0) == ':' {
+            self.consume(1);
+        } else {
+            self.report_parse_error("Expected ':'.");
+        }
+
+        self.parse_expansions();
+
+        // We are no longer parsing a token.
+        self.cur_token_name = "".into();
+        self.cur_priority = 0;
+    }
+
+    /// Parse a statement of the grammar.
+    ///
+    /// ```
+    /// statement: "%ignore" expansions                    -> ignore
+    ///          | "%declare" name+                        -> declare
+    /// ```
+    ///
+    /// Note that %import, %override, and %extend directives will have already
+    /// been expanded by the preprocessor by the time this procedure is called.
+    fn parse_statement(&mut self) {
+        match &self.input_string[self.cur_pos..self.cur_pos + 3] {
+            // 3 characters are sufficient to disambiguate.
+            "%ig" => {
+                self.consume("%ignore".len());
+                self.parse_ignore()
+            }
+            "%de" => {
+                self.consume("%declare".len());
+                self.parse_declare()
+            }
+            _ => self.report_parse_error("Invalid statement."),
+        }
+    }
+
+    /// Parse the priority.
+    ///
+    /// `priority: "." NUMBER`
+    ///
+    /// A priority can only be followed by a ":".
+    fn parse_priority(&mut self) {
+        if self.peek(0) == '.' {
+            self.consume(1);
+        } else {
+            self.report_parse_error("Expected '.'.");
+        }
+
+        let Some(number_match) = NUMBER_RE.find_at(&self.input_string, self.cur_pos) else {
+            // Add a return statement to make the compiler happy, even though
+            // this call never returns.
+            return self.report_parse_error("Expected a number.");
+        };
+
+        // Parsing as an integer *should* never fail, since we've just matched
+        // something that must be a valid number.
+        self.cur_priority = number_match.as_str().parse::<i32>().unwrap();
+        self.consume(number_match.len());
+    }
+
+    /// Parse the expansions of the rule.
+    ///
+    /// `?expansions: alias (_VBAR alias)*`
+    ///
+    // This begins a vertiginous descent into the bowels of the grammar.
+    fn parse_expansions(&mut self) {
+        self.consume_space();
+        self.parse_alias();
+        self.consume_space();
+        while VBAR_RE.is_match_at(&self.input_string, self.cur_pos) {
+            self.consume_space();
+            self.parse_alias();
+        }
+    }
+
+    /// Parse an alias.
+    ///
+    /// `?alias: expansion ["->" RULE]`
+    fn parse_alias(&mut self) {
+        self.consume_space();
+        self.parse_expansion();
+        self.consume_space();
+        if self.input_string[self.cur_pos..self.cur_pos + 2] == *"->" {
+            // We don't actually vare about aliases: they only matter to the
+            // parse tree that Lark would build if it was using this
+            // grammar. Just skip to the end of the line.
+            self.consume_to_end_of_line();
+        }
+    }
+
+    /// Parse an expansion.
+    ///
+    /// `?expansion: expr*`
+    ///
+    /// A Lark expansion must be on a single line.
+    fn parse_expansion(&mut self) {
+        // Naughty way to check whether we're still on the same line.
+        let start_line = self.cur_line;
+        while self.cur_line == start_line {
+            self.consume_space();
+            self.parse_expression();
+        }
+    }
+
+    /// Parse an expression.
+    ///
+    /// ?expr: atom (OP | "~" NUMBER (".." NUMBER))?
+    ///
+    /// This level of the grammar separates the quantifiers from the thing they
+    /// quantify.
+    fn parse_expression(&mut self) {
+        self.parse_atom();
+	self.consume_space();
+	if OP_RE.is_match_at(&self.input_string, self.cur_pos) {
+	    self.handle_op();
+	} else if self.peek(0) == '~' {
+	    self.consume(1);
+	    self.consume_space();
+	    self.handle_range();
+	}
+    }
+
+    /// Expand the templates in the grammar.
+    ///
+    /// Definition syntax:
+    /// `my_template{param1, param2, ...}: <EBNF EXPRESSION>`
+    /// Use syntax:
+    /// `some_rule: my_template{arg1, arg2, ...}`
+    /// Example:
+    /// ```
+    /// _separated{x, sep}: x (sep x)*  // Define a sequence of 'x sep x sep x ...'
+    /// num_list: "[" _separated{NUMBER, ","} "]"   // Will match "[1, 2, 3]" etc.
+    ///  ```
+    /// This is a macro expander that modifies the input string in place.
+    fn expand_templates(&mut self) {}
+
+    /// Expand the imports in the grammar.
+    ///
+    /// When importing rules, all their dependencies will be imported into a
+    /// namespace, to avoid collisions. It’s not possible to override their
+    /// dependencies (e.g. like you would when inheriting a class).
+    ///
+    /// Syntax:
+    ///    ```
+    /// %import <module>.<TERMINAL>
+    /// %import <module>.<rule>
+    /// %import <module>.<TERMINAL> -> <NEWTERMINAL>
+    /// %import <module>.<rule> -> <newrule>
+    /// %import <module> (<TERM1>, <TERM2>, <rule1>, <rule2>)
+    /// ```
+    ///
+    /// If the module path is absolute, [we] will attempt to load it from the
+    /// built-in directory (which currently contains common.lark, python.lark,
+    /// and unicode.lark).
+    ///
+    /// If the module path is relative, such as .path.to.file, [we] will
+    /// attempt to load it from the current working directory. Grammars must
+    /// have the .lark extension.
+    ///
+    /// The rule or terminal can be imported under another name with the -> syntax.
+    fn expand_imports(&mut self) {}
+
+    /// Expand override directives in the grammar.
+    ///
+    /// Override a rule or terminals, affecting all references to it, even in imported grammars.
+    ///
+    /// Useful for implementing an inheritance pattern when importing grammars.
+    ///
+    /// Example:
+    /// ```
+    /// %import my_grammar (start, number, NUMBER)
+    /// // Add hex support to my_grammar
+    /// %override number: NUMBER | /0x\w+/
+    /// ````
+    ///
+    /// There is no requirement for a rule/terminal to come from another file,
+    /// but that is probably the most common use case.
+    fn expand_overrides(&mut self) {}
+
+    /// Expand extend directives in the grammar.
+    ///
+    /// Extend the definition of a rule or terminal, e.g. add a new option on
+    /// what it can match, like when separated with |.
+    ///
+    /// Useful for splitting up a definition of a complex rule with many
+    /// different options over multiple files.
+    ///
+    /// Can also be used to implement a plugin system where a core grammar is extended by others.
+    ///
+    /// Example:
+    /// ```
+    /// %import my_grammar (start, NUMBER)
+    ///
+    /// // Add hex support to my_grammar
+    /// %extend NUMBER: /0x\w+/
+    /// ```
+    ///
+    /// There is no requirement for a rule/terminal to come from another file,
+    /// but that is probably the most common use case.
+    fn expand_extends(&mut self) {}
 
     /// Consume the specified number of characters, maintaining line and column number.
     fn consume(&mut self, count: usize) {
@@ -383,38 +394,29 @@ impl EBNFParser {
         self.input_string.chars().nth(self.cur_pos + delta).unwrap()
     }
 
-    /// Consume the next whitespace in the input.
-    fn consume_space(&mut self, allow_newline: bool) {
+    /// Consume the next whitespace and comment in the input.
+    fn consume_space(&mut self) {
         while self.cur_pos < self.input_string.len()
             && (self.peek(0) == ' '
                 || self.peek(0) == '\t'
                 || self.peek(0) == '#'
-                || (allow_newline && (self.peek(0) == '\n' || self.peek(0) == '\r')))
+                || self.peek(0) == '/' && self.peek(1) == '/')
         {
-            if self.peek(0) == '#' {
-                // Skip over comments, which extend to the end of the line.
-                while self.cur_pos < self.input_string.len()
-                    && self.peek(0) != '\n'
-                    && self.peek(0) != '\r'
-                {
-                    self.consume(1);
-                }
-                // XGrammar has a check here with the comment "Reserve
-                // \n for inline comment". My C++ isn't good enough to
-                // understand the conditions under which their Peek()
-                // operation, which dereferences a pointer into the string
-                // representing the grammar, can return a value that will be
-                // coerced to the bool false. Perhaps they're checking whether
-                // the end of the input was reached? Any clarification would be
-                // greatly appreciated.
-                if self.peek(0) == '\r' && self.peek(1) == 'n' {
-                    // Handle CRLF newliens.
-                    self.consume(2);
-                } else {
-                    self.consume(1)
-                }
-            } else {
+            if self.peek(0) == '#' || self.peek(0) == '/' && self.peek(1) == '/' {
+                self.consume_to_end_of_line();
+            }
+        }
+    }
+
+    /// Consume to the end of the line.
+    ///
+    /// Useful for skipping aliases and comments.
+    fn consume_to_end_of_line(&mut self) {
+        while self.cur_pos < self.input_string.len() {
+            if !(self.peek(0) == '\n' || (self.peek(0) == '\r' && self.peek(0) == '\n')) {
                 self.consume(1);
+            } else {
+                break;
             }
         }
     }
